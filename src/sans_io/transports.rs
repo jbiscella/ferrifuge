@@ -149,4 +149,28 @@ mod tests {
         );
         assert_eq!(transports.current(), TransportKind::WebSocket);
     }
+
+    // Block 65b: a mutant of run 43982614806 the tests above let through.
+    #[test]
+    fn restart_returns_to_the_first_transport_and_round() {
+        let mut transports = Transports::new(vec![
+            TransportKind::WebSocket,
+            TransportKind::HttpStream,
+            TransportKind::Sse,
+        ]);
+        transports.attempt_failed();
+        let moved = (transports.current(), transports.index());
+        transports.choose();
+        transports.restart();
+
+        assert_eq!(moved, (TransportKind::HttpStream, 1));
+        assert_eq!(
+            (
+                transports.current(),
+                transports.index(),
+                transports.in_first_round()
+            ),
+            (TransportKind::WebSocket, 0, true)
+        );
+    }
 }

@@ -4733,6 +4733,8 @@ mod tests {
         for (error, expect_disconnect) in [
             (r#"{"code":400,"message":"busy","temporary":true}"#, false),
             (r#"{"code":403,"message":"forbidden"}"#, true),
+            // Block 65b: from 100 on, only a temporary error is retried.
+            (r#"{"code":100,"message":"internal"}"#, true),
         ] {
             let (mut machine, transport, _) = connected_with_token(30);
             let fetch = fetch_requested(&machine.fire(Timer::Refresh));
@@ -5245,5 +5247,258 @@ mod tests {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");
+    }
+
+    // Block 65b: mutants of run 43982614806 the tests above let through.
+
+    // `with_transports` refuses while connecting with no transport, as in
+    // the reconnect delay, not only with one.
+    #[test]
+    fn transports_cannot_change_while_waiting_the_reconnect_delay() {
+        let mut machine = machine();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportFailed {
+            transport,
+            message: "refused".into(),
+        });
+        assert_eq!(machine.state(), State::Connecting);
+
+        let result = machine.with_transports(vec![TransportKind::HttpStream]);
+
+        assert!(
+            matches!(&result, Err(error) if error.kind == ErrorKind::Configuration),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    // Every input naming a transport the machine abandoned changes
+    // nothing, the counters included.
+    #[test]
+    fn every_input_about_an_abandoned_transport_is_ignored() {
+        let abandoned = || {
+            let (mut machine, stale) = awaiting_connect_reply();
+            machine.fire(Timer::ConnectTimeout);
+            let current = opened_transport(&machine.fire(Timer::Reconnect));
+            let opened = machine.handle(Input::TransportOpened(current));
+            let (id, sent) = opened
+                .iter()
+                .find_map(|action| match action {
+                    Action::Send { id, frame, .. } => Some((*id, frame.clone())),
+                    _ => None,
+                })
+                .expect("the connect command on the current transport");
+            (machine, stale, id, sent)
+        };
+        let inputs: Vec<Box<dyn Fn(TransportId, FrameId, Vec<u8>) -> Input>> = vec![
+            Box::new(|stale, _, _| Input::TransportOpened(stale)),
+            Box::new(|stale, _, _| Input::TransportFailed {
+                transport: stale,
+                message: "refused".into(),
+            }),
+            Box::new(|stale, _, _| Input::TransportClosed {
+                transport: stale,
+                code: None,
+                reason: String::new(),
+            }),
+            Box::new(|stale, _, _| Input::MessageTooLarge(stale)),
+            Box::new(|stale, _, sent| Input::SendRejected {
+                transport: stale,
+                frame: sent,
+            }),
+            Box::new(|stale, id, _| Input::FrameWritten {
+                transport: stale,
+                frame: id,
+            }),
+            Box::new(|stale, _, _| frame(stale, r#"{"id":1,"connect":{"client":"c"}}"#)),
+        ];
+        for (n, input) in inputs.iter().enumerate() {
+            let (mut machine, stale, id, sent) = abandoned();
+            let before = machine.statistics();
+
+            let actions = machine.handle(input(stale, id, sent));
+
+            assert_eq!(actions, [], "input {n}");
+            assert_eq!(machine.state(), State::Connecting, "input {n}");
+            assert_eq!(machine.statistics(), before, "input {n}");
+        }
+    }
+
+    // A message too large waits, as a close does, for a `Connected` event
+    // not yet taken (Block 15).
+    #[test]
+    fn a_message_too_large_behind_a_connected_event_not_taken_waits_for_it() {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        let connected = machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        let event = connected
+            .iter()
+            .find_map(|action| match action {
+                Action::Emit(id, ClientEvent::Connected(_)) => Some(*id),
+                _ => None,
+            })
+            .expect("a Connected event");
+
+        let too_large = machine.handle(Input::MessageTooLarge(transport));
+
+        assert!(events(&too_large).is_empty(), "{too_large:?}");
+        assert_eq!(machine.state(), State::Connected);
+        let taken = machine.handle(Input::EventTaken(event));
+        assert_eq!(
+            events(&taken),
+            [&ClientEvent::Disconnected(crate::DisconnectedContext {
+                code: codes::disconnected::MESSAGE_SIZE_LIMIT,
+                reason: "message size limit exceeded".into()
+            })]
+        );
+    }
+
+    // A transport that closes before it opened is a failed attempt,
+    // reported.
+    #[test]
+    fn a_transport_closed_before_it_opened_is_a_failed_attempt() {
+        let mut machine = machine();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+
+        let actions = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Error(ClientError {
+                kind: ErrorKind::Transport,
+                code: codes::error::TRANSPORT_CLOSED,
+                message: "transport closed".into(),
+                transport: Some(TransportKind::WebSocket),
+            })]
+        );
+    }
+
+    // Only a reply to a command, never a push, resets the backoff an
+    // emulated connection's connect reply left pending.
+    #[test]
+    fn only_a_reply_to_a_command_resets_an_emulated_connections_backoff() {
+        let mut machine = machine()
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportFailed {
+            transport,
+            message: "refused".into(),
+        });
+        let transport = opened_transport(&machine.fire(Timer::Reconnect));
+        machine.handle(Input::TransportOpened(transport));
+        let id = machine.connect_command.expect("a connect command");
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#),
+        ));
+        let grown = machine.backoff.attempt();
+        assert!(grown > 0, "{grown}");
+
+        machine.handle(frame(transport, r#"{"push":{"message":{"data":{}}}}"#));
+        let after_push = machine.backoff.attempt();
+        machine.handle(frame(transport, r#"{"id":99}"#));
+
+        assert_eq!((after_push, machine.backoff.attempt()), (grown, 0));
+    }
+
+    // An error reply with no id is not a ping: no pong answers it.
+    #[test]
+    fn an_error_without_an_id_is_not_a_ping() {
+        let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
+
+        let actions = machine.handle(frame(transport, r#"{"error":{"code":1,"message":"x"}}"#));
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::Send { .. })),
+            "{actions:?}"
+        );
+    }
+
+    // Only the connect command's reply connects.
+    #[test]
+    fn a_reply_that_is_not_the_connect_commands_does_not_connect() {
+        let (mut machine, transport) = awaiting_connect_reply();
+
+        let other = machine.handle(frame(transport, r#"{"id":2,"connect":{"client":"c"}}"#));
+        let state = machine.state();
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        assert!(events(&other).is_empty(), "{other:?}");
+        assert_eq!(
+            (state, machine.state()),
+            (State::Connecting, State::Connected)
+        );
+    }
+
+    // A connect error below 100 is retried; from 100 only a temporary one.
+    #[test]
+    fn connect_errors_below_100_retry_and_from_100_only_when_temporary() {
+        for (code, state) in [(2, State::Connecting), (100, State::Disconnected)] {
+            let (mut machine, transport) = awaiting_connect_reply();
+
+            machine.handle(frame(
+                transport,
+                &format!(r#"{{"id":1,"error":{{"code":{code},"message":"internal"}}}}"#),
+            ));
+
+            assert_eq!(machine.state(), state, "code {code}");
+        }
+    }
+
+    // A gap from the threshold on is a sleep, unless disconnected.
+    #[test]
+    fn a_gap_from_the_threshold_is_a_sleep_unless_disconnected() {
+        let shortened = |actions: &[Action]| {
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::ShortenTimer(..)))
+        };
+        let (mut connecting, _) = awaiting_connect_reply();
+        let short = connecting.handle(Input::Slept {
+            gap: SLEEP_THRESHOLD - Duration::from_millis(1),
+        });
+        let long = connecting.handle(Input::Slept {
+            gap: SLEEP_THRESHOLD,
+        });
+        let disconnected = machine().handle(Input::Slept {
+            gap: Duration::from_secs(60),
+        });
+
+        assert!(!shortened(&short), "{short:?}");
+        assert!(
+            long.contains(&Action::ShortenTimer(
+                TimerKey::Client(Timer::Refresh),
+                SLEEP_THRESHOLD
+            )),
+            "{long:?}"
+        );
+        assert!(!shortened(&disconnected), "{disconnected:?}");
+    }
+
+    // The default bound of a map's state and of a shared poll's delta bases
+    // is 64 MiB.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn big_bounds_default_to_64_mib() {
+        assert_eq!(
+            (
+                MapSubscriptionOptions::new(crate::MapKind::Map)
+                    .max_state_bytes
+                    .get(),
+                SharedPollSubscriptionOptions::default()
+                    .max_delta_bases_bytes
+                    .get()
+            ),
+            (67_108_864, 67_108_864)
+        );
     }
 }

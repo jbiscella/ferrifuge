@@ -403,4 +403,80 @@ mod tests {
 
         assert_eq!((other, pending, again), (false, true, false));
     }
+
+    // Block 65b: mutants of run 43982614806 the tests above let through.
+
+    #[test]
+    fn a_token_is_held_unless_empty() {
+        let held = Tokens::new("t".into(), false);
+        let none = Tokens::new(String::new(), true);
+
+        assert_eq!((held.has_token(), none.has_token()), (true, false));
+    }
+
+    #[test]
+    fn a_refresh_is_in_flight_from_its_fetch_to_its_reply() {
+        let mut tokens = Tokens::new("t".into(), true);
+        let before = tokens.refresh_in_flight();
+        let fetch = tokens.start_fetch(FetchPurpose::Refresh);
+        let fetching = tokens.refresh_in_flight();
+        tokens.take_fetch(fetch);
+        tokens.for_refresh(7);
+        let sent = tokens.refresh_in_flight();
+        let (awaited, other) = (
+            tokens.awaits_refresh_reply(7),
+            tokens.awaits_refresh_reply(8),
+        );
+        tokens.take_refresh_reply(7);
+
+        assert_eq!(
+            (
+                before,
+                fetching,
+                sent,
+                awaited,
+                other,
+                tokens.refresh_in_flight()
+            ),
+            (false, true, true, true, false, false)
+        );
+    }
+
+    #[test]
+    fn a_connection_or_a_forgotten_refresh_needs_no_fetch() {
+        let mut connected = Tokens::new("t".into(), true);
+        connected.for_connect();
+        connected.connect_token_expired();
+        connected.connected();
+        let mut forgotten = Tokens::new("t".into(), true);
+        forgotten.start_fetch(FetchPurpose::Refresh);
+        forgotten.forget_refresh();
+        forgotten.abandon_refresh();
+
+        assert_eq!(
+            (connected.before_connect(), forgotten.before_connect()),
+            (BeforeConnect::Ready, BeforeConnect::Ready)
+        );
+    }
+
+    #[test]
+    fn a_refresh_fetch_stays_stale_across_reconnects_until_a_disconnect() {
+        let mut tokens = Tokens::new("t".into(), true);
+        let first = tokens.start_fetch(FetchPurpose::Refresh);
+        tokens.teardown(true);
+        tokens.teardown(true);
+        let across_reconnects = tokens.take_stale_fetch(first);
+        let second = tokens.start_fetch(FetchPurpose::Refresh);
+        tokens.teardown(true);
+        tokens.teardown(false);
+        let after_a_disconnect = tokens.take_stale_fetch(second);
+        let third = tokens.start_fetch(FetchPurpose::Refresh);
+        tokens.teardown(false);
+        let of_a_disconnect = tokens.take_stale_fetch(third);
+
+        assert_eq!(
+            (across_reconnects, after_a_disconnect, of_a_disconnect),
+            (true, false, false)
+        );
+    }
 }
