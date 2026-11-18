@@ -887,3 +887,114 @@ fn a_refresh_set_again_acts_on_its_new_setting_only() {
     let fired = machine.handle(Input::TimerFired(key, latest));
     assert!(!fetches(&fired).is_empty(), "{fired:?}");
 }
+
+// Block 65e: mutants of run 43982614806 the tests above let through.
+
+// A 109 without a callback reports the error once and fetches nothing.
+#[test]
+fn a_109_without_a_callback_reports_it_once() {
+    let (mut machine, transport, id) = subscribed(false, false);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "old"));
+
+    let actions = machine.handle(refused(transport, &command, 109));
+
+    assert_eq!(
+        errors(&actions)
+            .iter()
+            .map(|error| (error.kind, error.code))
+            .collect::<Vec<_>>(),
+        [(ErrorKind::Track, 109)]
+    );
+    assert!(fetches(&actions).is_empty(), "{actions:?}");
+}
+
+// Two 109s for one key run one refresh, whose signature tracks the key
+// once.
+#[test]
+fn two_109s_for_one_key_run_one_refresh() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let first = the_track(&track(&mut machine, id, &[("a", 0)], "old-1"));
+    let second = the_track(&track(&mut machine, id, &[("a", 0)], "old-2"));
+
+    let (request, _) = the_fetch(&machine.handle(refused(transport, &first, 109)));
+    let again = machine.handle(refused(transport, &second, 109));
+    let renewed = signed(&mut machine, id, request, &["a"], "new");
+
+    assert!(fetches(&again).is_empty(), "{again:?}");
+    the_track(&renewed);
+    assert!(fetches(&renewed).is_empty(), "{renewed:?}");
+}
+
+// A key set whose batch fits the budget exactly is signed in one chunk
+// and tracked.
+#[test]
+fn a_key_set_of_exactly_the_budget_is_signed_whole() {
+    let (mut machine, transport) = connected();
+    let mut options = options(true);
+    options.max_track_frame_bytes =
+        std::num::NonZeroUsize::new(chunk_cost(&names(&["a", "b"]))).unwrap();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+    let actions = machine.handle(Input::Subscribe(id));
+    take_all(&mut machine, &actions);
+    let answered = answer_subscribe(&mut machine, transport, &actions);
+    take_all(&mut machine, &answered);
+
+    let (request, keys) = the_fetch(&machine.handle(Input::TrackKeys(id, names(&["a", "b"]))));
+    let tracked = signed(&mut machine, id, request, &["a", "b"], &"s".repeat(128));
+
+    assert_eq!(keys, ["a", "b"]);
+    the_track(&tracked);
+    assert!(errors(&tracked).is_empty(), "{tracked:?}");
+}
+
+// A refresh started by a 109 keeps the replay retry another refusal
+// scheduled; the retry then replays every signature.
+#[test]
+fn a_refresh_keeps_a_pending_replay_retry() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let first = the_track(&track(&mut machine, id, &[("a", 0)], "sig-a"));
+    let second = the_track(&track(&mut machine, id, &[("b", 0)], "sig-b"));
+    let (retry, _) = the_timer(&machine.handle(refused(transport, &first, 1)));
+
+    let refreshing = machine.handle(refused(transport, &second, 109));
+    let replayed = machine.fire_key(TimerKey::SharedPoll(retry));
+
+    assert_eq!(the_fetch(&refreshing).1, ["a", "b"]);
+    assert!(
+        !timers_cancelled(&refreshing).contains(&retry),
+        "{refreshing:?}"
+    );
+    assert_eq!(
+        items(&the_track(&replayed)),
+        [("a".into(), 0), ("b".into(), 0)]
+    );
+}
+
+// A refresh whose signatures were all revoked ends the refresh backoff:
+// the next refresh's failure waits the first step's delay.
+#[test]
+fn a_refresh_that_revokes_everything_starts_its_backoff_over() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    machine.rng = fastrand::Rng::with_seed(7);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig1"));
+    let (mut request, _) = the_fetch(&machine.handle(refused(transport, &command, 109)));
+    for _ in 0..2 {
+        let (timer, _) = the_timer(&failed(&mut machine, id, request));
+        request = the_fetch(&machine.fire_key(TimerKey::SharedPoll(timer))).0;
+    }
+    signed(&mut machine, id, request, &["z"], "s");
+    let command = the_track(&track(&mut machine, id, &[("b", 0)], "sig2"));
+    let (request, _) = the_fetch(&machine.handle(refused(transport, &command, 109)));
+    let want = crate::backoff::delay(
+        0,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        &mut machine.rng.clone(),
+    );
+
+    let (_, delay) = the_timer(&failed(&mut machine, id, request));
+
+    assert_eq!(delay, want);
+}

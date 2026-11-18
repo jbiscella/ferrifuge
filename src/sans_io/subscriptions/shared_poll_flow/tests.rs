@@ -1297,3 +1297,178 @@ fn a_delta_in_a_track_reply_holds_no_message() {
 mod delta;
 mod replay;
 mod signatures;
+
+// Block 65e: mutants of run 43982614806 the tests above let through.
+
+// A track frame takes batches while it stays within the budget exactly;
+// so does an untrack request.
+#[test]
+fn track_frames_and_untrack_requests_fill_the_budget_exactly() {
+    let batch = |key: &str| crate::wire::TrackBatch {
+        signature: crate::token::Secret("s".into()),
+        items: vec![crate::wire::KeyedItem {
+            key: key.into(),
+            version: 0,
+        }],
+    };
+    let batches = vec![batch("a"), batch("b")];
+    let exact = SharedPollFlow::track_cost("items", &batches);
+    let none = HashSet::new();
+    let keys = vec!["a".to_owned(), "b".into()];
+    let untrack_exact = FRAME_COST
+        + escaped_twice("items")
+        + keys.iter().map(|key| untrack_key_cost(key)).sum::<usize>();
+
+    assert_eq!(
+        SharedPollFlow::track_frames("items", batches.clone(), &none, exact).len(),
+        1
+    );
+    assert_eq!(
+        SharedPollFlow::track_frames("items", batches, &none, exact - 1).len(),
+        2
+    );
+    assert_eq!(
+        SharedPollFlow::untrack_requests("items", keys.clone(), untrack_exact),
+        std::slice::from_ref(&keys)
+    );
+    assert_eq!(
+        SharedPollFlow::untrack_requests("items", keys, untrack_exact - 1).len(),
+        2
+    );
+}
+
+// The subscribe names the channel and carries the token; its reply emits
+// Subscribed.
+#[test]
+fn the_subscribe_carries_channel_and_token_and_its_reply_subscribes() {
+    let (mut machine, transport) = connected();
+    let mut options = options(false);
+    options.common = SubscriptionOptions::default().token("t1".into());
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+
+    let actions = machine.handle(Input::Subscribe(id));
+    let answered = answer_subscribe(&mut machine, transport, &actions);
+
+    let subscribe = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some())
+        .expect("a subscribe");
+    assert_eq!(subscribe["subscribe"]["channel"], "items", "{subscribe}");
+    assert_eq!(subscribe["subscribe"]["token"], "t1", "{subscribe}");
+    assert!(
+        events(&answered)
+            .iter()
+            .any(|(_, event)| matches!(event, SharedPollSubscriptionEvent::Subscribed(_))),
+        "{answered:?}"
+    );
+}
+
+// A track reply item without a version is delivered and does not count
+// as a duplicate of a later older one.
+#[test]
+fn a_versionless_item_is_delivered_between_versioned_ones() {
+    let (mut machine, transport, id) = subscribed(false, true);
+    let command = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+
+    let replied = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": command["id"], "sub_refresh": {"type": 1, "items": [
+            {"key": "a", "data": {}, "version": 5},
+            {"key": "a", "data": {}},
+            {"key": "a", "data": {}, "version": 3}
+        ]}})
+        .to_string(),
+    ));
+
+    let versions: Vec<Option<u64>> = updates(&replied)
+        .into_iter()
+        .map(|(_, update)| update.version)
+        .collect();
+    assert_eq!(versions, [Some(5), None], "{replied:?}");
+}
+
+// A batch of exactly the budget is tracked.
+#[test]
+fn a_batch_of_exactly_the_budget_is_tracked() {
+    let (mut machine, transport) = connected();
+    let mut options = options(false);
+    options.max_track_frame_bytes = std::num::NonZeroUsize::new(SharedPollFlow::track_cost(
+        "items",
+        [&crate::wire::TrackBatch {
+            signature: crate::token::Secret("sig1".into()),
+            items: vec![crate::wire::KeyedItem {
+                key: "a".into(),
+                version: 0,
+            }],
+        }],
+    ))
+    .unwrap();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let actions = machine.handle(Input::Subscribe(id));
+    answer_subscribe(&mut machine, transport, &actions);
+
+    let tracked = track(&mut machine, id, &[("a", 0)], "sig1");
+
+    assert_eq!(requests(&tracked, 1).len(), 1, "{tracked:?}");
+    assert!(events(&tracked).is_empty(), "{tracked:?}");
+}
+
+// Over an emulated transport, a refused track request does not drop the
+// next one queued behind it.
+#[test]
+fn a_refused_emulated_track_keeps_the_next_one_queued() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    let first = emulated_requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+    track(&mut machine, id, &[("b", 0)], "sig2");
+
+    let refused = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": first["id"], "error": {"code": 103, "message": "no"}})
+            .to_string(),
+    ));
+
+    let next = emulated_requests(&refused, 1);
+    assert_eq!(items(&next[0]), [("b".into(), 0)], "{refused:?}");
+    assert_eq!(machine.shared_poll_tracked_keys(id).unwrap(), ["b"]);
+}
+
+// A track request refused with 413 while the subscription is
+// resubscribing does not unsubscribe it.
+#[test]
+fn a_413_while_resubscribing_does_not_unsubscribe() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    let tracked = track(&mut machine, id, &[("a", 0)], "sig1");
+    let body = tracked
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the track request");
+    let resubscribing = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"items","unsubscribe":{"code":2500,"reason":"again"}}}"#,
+    ));
+    take_all(&mut machine, &resubscribing);
+
+    let rejected = machine.handle(Input::SendRejected {
+        transport,
+        frame: body,
+    });
+
+    assert!(
+        !events(&rejected)
+            .iter()
+            .any(|(_, event)| matches!(event, SharedPollSubscriptionEvent::Unsubscribed(_))),
+        "{rejected:?}"
+    );
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Subscribing)
+    );
+}

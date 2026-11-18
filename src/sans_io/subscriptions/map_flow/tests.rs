@@ -194,6 +194,8 @@ fn a_load_pages_the_state_then_the_stream_then_syncs() {
             entry("c", 1, 3)
         ),
     )));
+    // Block 65e: the stream phase of a load from scratch recovers nothing.
+    assert!(third["subscribe"].get("recover").is_none(), "{third}");
     let fourth = subscribe_sent(&machine.handle(frame(
         transport,
         &format!(
@@ -1037,6 +1039,18 @@ fn a_recovery_answered_live_without_catch_up_sets_the_reply_position() {
 
     assert_eq!(names(&live), ["subscribed"]);
     assert_eq!(machine.subscription_position(id).unwrap().offset, 9);
+    // Block 65e: the Subscribed event carries the recovered position.
+    let Some((_, MapSubscriptionEvent::Subscribed(subscribed))) = events(&live).into_iter().next()
+    else {
+        panic!("{live:?}")
+    };
+    assert_eq!(
+        subscribed.stream_position,
+        Some(crate::StreamPosition {
+            offset: 9,
+            epoch: "e1".into()
+        })
+    );
 }
 
 #[test]
@@ -2199,4 +2213,235 @@ fn a_page_read_after_a_held_disconnect_push_is_not_handled_early() {
     ));
 
     assert!(sent(&read).is_empty(), "{read:?}");
+}
+
+// Block 65e: mutants of run 43982614806 the tests above let through.
+
+// A live reply of exactly `max_state_bytes` is loaded.
+#[test]
+fn a_reply_of_exactly_max_state_bytes_is_loaded() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.max_state_bytes = NonZeroUsize::new(300).unwrap();
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let live = |fill: usize| {
+        subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"epoch":"e1","offset":5,"state":[{{"key":"k","data":"{}"}}]"#,
+                "x".repeat(fill)
+            ),
+        )
+    };
+    let reply = live(300 - live(0).len());
+    assert_eq!(reply.len(), 300);
+
+    let loaded = machine.handle(frame(transport, &reply));
+
+    assert_eq!(unsubscribes(&loaded), 0, "{loaded:?}");
+    assert_eq!(sync_keys(&loaded), ["k"]);
+}
+
+// A state rebuilt from deltas to exactly the bound is synced.
+#[test]
+fn a_state_rebuilt_to_exactly_the_bound_syncs() {
+    let base = long_value(200);
+    let reply = |first: &Value| {
+        subscribe_reply(
+            first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":2,"state":[{}],"publications":[{}]"#,
+                whole_bytes("a", &base, 1),
+                expanding("a", &base, 5, 2)
+            ),
+        )
+    };
+    let (mut machine, transport) = connected();
+    let (_, first) = bounded_delta(&mut machine, 1000);
+
+    let loaded = machine.handle(frame(transport, &reply(&first)));
+
+    assert_eq!(unsubscribes(&loaded), 0, "{loaded:?}");
+    let synced = events(&loaded)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            MapSubscriptionEvent::Sync(entries) => Some(entries),
+            _ => None,
+        });
+    assert_eq!(
+        synced.expect("a sync")[0].data,
+        base.repeat(5),
+        "{loaded:?}"
+    );
+}
+
+/// A delta map with a bound of 1000 bytes synced with `a` (200 bytes) at
+/// offset 1, reconnected; its catch-up rebuilds `a` five times (1000
+/// bytes), the recovery `recovered` or not.
+fn recovered_to_the_bound(recovered: bool) -> Vec<Action> {
+    let (mut machine, transport) = connected();
+    let (_, first) = bounded_delta(&mut machine, 1000);
+    let base = long_value(200);
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"state":[{}]"#,
+                whole_bytes("a", &base, 1)
+            ),
+        ),
+    ));
+    take_all(&mut machine, &live);
+    let (transport, recovering) = reconnect(&mut machine, transport);
+    let recovering = recovering.expect("a subscribe");
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"was_recovering":true,"recovered":{recovered},"epoch":"e1","offset":2,"publications":[{}]"#,
+                expanding("a", &base, 5, 2)
+            ),
+        ),
+    ))
+}
+
+// A catch-up rebuilt to exactly the bound is kept, whether the recovery
+// completed (updates) or not (a sync).
+#[test]
+fn a_catch_up_rebuilt_to_exactly_the_bound_is_kept() {
+    let completed = recovered_to_the_bound(true);
+    let not_completed = recovered_to_the_bound(false);
+
+    assert_eq!(unsubscribes(&completed), 0, "{completed:?}");
+    assert_eq!(updates(&completed)[0].data, long_value(200).repeat(5));
+    assert_eq!(unsubscribes(&not_completed), 0, "{not_completed:?}");
+    assert_eq!(sync_keys(&not_completed), ["a"]);
+}
+
+// Every page request names the channel, the flag and the tag filter.
+#[test]
+fn every_request_names_its_channel_flag_and_tag_filter() {
+    let (mut machine, _) = connected();
+    let mut options = options(2);
+    options.common = SubscriptionOptions::default()
+        .tag_filter(crate::TagFilter::eq("t", "red"))
+        .channel_compaction(true);
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let request = &first["subscribe"];
+    assert_eq!(request["channel"], "scores", "{first}");
+    assert_eq!(request["flag"], 1, "{first}");
+    assert_eq!(
+        request["tf"],
+        serde_json::json!({"key":"t","cmp":"eq","val":"red"}),
+        "{first}"
+    );
+}
+
+// A page read before the connect reply, behind a message whose event is
+// held, waits while the client is still connecting.
+#[test]
+fn a_page_read_before_the_connect_reply_waits_while_an_event_is_held() {
+    let mut machine = Machine::new(Config::default());
+    machine.handle(Input::StreamOpened(None));
+    let id = machine
+        .add_map_subscription("scores".into(), options(2))
+        .unwrap();
+    machine.handle(Input::Subscribe(id));
+    let transport = opened(&machine.handle(Input::Connect)).unwrap();
+    let opened = machine.handle(Input::TransportOpened(transport));
+    let first = sent(&opened)
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some())
+        .expect("the first request with the connect command");
+
+    machine.handle(frame(
+        transport,
+        &format!(
+            "{}\n{}",
+            r#"{"push":{"message":{"data":{}}}}"#,
+            subscribe_reply(
+                &first,
+                r#""type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5"#
+            )
+        ),
+    ));
+
+    assert_eq!(machine.read_ahead().0, 1);
+}
+
+/// A connected machine whose "news" publication, not taken, holds the
+/// messages after it, and a map subscription "scores" whose first request
+/// was sent.
+fn held_behind_a_publication() -> (Machine, TransportId, Value) {
+    let (mut machine, transport) = connected();
+    let news = machine
+        .add_subscription("news".into(), SubscriptionOptions::default())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(news)));
+    let subscribe = subscribe_sent(&machine.handle(Input::Subscribe(news)));
+    for action in machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"subscribe":{{}}}}"#, id_of(&subscribe)),
+    )) {
+        if let Action::EmitSubscription(event, ..) = action {
+            machine.handle(Input::EventTaken(event));
+        }
+    }
+    machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"news","pub":{"data":{}}}}"#,
+    ));
+    let id = machine
+        .add_map_subscription("scores".into(), options(2))
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    (machine, transport, first)
+}
+
+// A faulty page waits its turn behind the held publication.
+#[test]
+fn a_faulty_page_waits_its_turn_behind_a_held_publication() {
+    let (mut machine, transport, first) = held_behind_a_publication();
+
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(&first, r#""type":1,"phase":1,"epoch":"e1","offset":5"#),
+    ));
+
+    assert_eq!(machine.state(), State::Connected);
+    assert_eq!(machine.read_ahead().0, 1);
+}
+
+// A later page of the same epoch is handled while a publication is held.
+#[test]
+fn a_later_page_of_the_same_epoch_is_handled_while_a_publication_is_held() {
+    let (mut machine, transport, first) = held_behind_a_publication();
+    let second = subscribe_sent(&machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5"#,
+        ),
+    )));
+
+    let third = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &second,
+            r#""type":1,"phase":2,"cursor":"c2","epoch":"e1","offset":5"#,
+        ),
+    ));
+
+    assert_eq!(subscribe_sent(&third)["subscribe"]["cursor"], "c2");
 }

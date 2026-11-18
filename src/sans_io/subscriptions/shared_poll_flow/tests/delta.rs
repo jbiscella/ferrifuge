@@ -1049,3 +1049,18 @@ fn a_refused_track_leaves_no_inline_untrack() {
         flow.inline_untracked
     );
 }
+
+// Block 65e: a base of exactly the bound is kept.
+#[test]
+fn a_base_of_exactly_the_bound_is_kept() {
+    let (mut machine, transport, id) = tracking_with(Config::default(), 100, &["a"]);
+
+    let pushed = push_all(&mut machine, transport, &[whole("a", 1, &sized(100))]);
+
+    assert!(!ended_by_the_bound(&pushed), "{pushed:?}");
+    assert_eq!(values(&pushed)[0].1.len(), 100);
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Subscribed)
+    );
+}

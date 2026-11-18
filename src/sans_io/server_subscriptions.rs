@@ -608,4 +608,184 @@ mod tests {
         );
         assert_eq!(machine.server_subscriptions(), Vec::<String>::new());
     }
+
+    // Block 65e: mutants of run 43982614806 the tests above let through.
+
+    fn transport_of(actions: &[Action]) -> TransportId {
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("an attempt")
+    }
+
+    /// The `subs` of the connect command among `actions`.
+    fn connect_subs(actions: &[Action]) -> serde_json::Value {
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { frame, .. } => {
+                    serde_json::from_slice::<serde_json::Value>(frame).ok()
+                }
+                _ => None,
+            })
+            .expect("a connect command")["connect"]["subs"]
+            .clone()
+    }
+
+    fn at(offset: u64) -> StreamPosition {
+        StreamPosition {
+            offset,
+            epoch: "e".into(),
+        }
+    }
+
+    // A server-side subscription's position, set by the connect reply and
+    // moved by a live publication, is what the next connect recovers from.
+    #[test]
+    fn the_next_connect_recovers_a_server_side_subscription_from_its_last_position() {
+        let (mut machine, transport) = opened();
+        let connected = machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{"recoverable":true,"epoch":"e","offset":9,"publications":[{"data":{},"offset":4},{"data":{}}]},"quiet":{}}}}"#,
+        ));
+        assert!(
+            events(&connected).iter().any(|event| matches!(
+                event,
+                ClientEvent::ServerSubscription {
+                    channel,
+                    event: ServerSubscriptionEvent::Subscribed(context),
+                } if channel == "alerts" && context.stream_position == Some(at(9))
+            )),
+            "{connected:?}"
+        );
+        assert_eq!(machine.statistics().server_subscriptions, 2);
+        assert_eq!(machine.server_subscription_position("alerts"), Some(at(9)));
+        machine.handle(reply(
+            transport,
+            r#"{"push":{"channel":"alerts","pub":{"data":{},"offset":10}}}"#,
+        ));
+
+        let closed = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3000),
+            reason: "reconnect".into(),
+        });
+        let next = transport_of(&machine.fire(Timer::Reconnect));
+        let opened = machine.handle(Input::TransportOpened(next));
+
+        assert!(
+            events(&closed).contains(&&ClientEvent::ServerSubscription {
+                channel: "alerts".into(),
+                event: ServerSubscriptionEvent::Subscribing,
+            }),
+            "{closed:?}"
+        );
+        assert_eq!(
+            connect_subs(&opened),
+            serde_json::json!({"alerts":{"recover":true,"epoch":"e","offset":10}})
+        );
+    }
+
+    // After the server invalidated the state (3014), the next connect asks
+    // to recover from a position nothing matches.
+    #[test]
+    fn state_invalidated_makes_the_next_connect_recover_from_an_unmatchable_position() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{"recoverable":true,"epoch":"e","offset":9}}}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3014),
+            reason: "state invalidated".into(),
+        });
+        let next = transport_of(&machine.fire(Timer::Reconnect));
+
+        let opened = machine.handle(Input::TransportOpened(next));
+
+        assert_eq!(
+            connect_subs(&opened),
+            serde_json::json!({"alerts":{"recover":true,"epoch":"_"}})
+        );
+    }
+
+    // A handler that panics on a server-side publication moves the
+    // position back: the next connect recovers from before it.
+    #[test]
+    fn a_handler_panic_moves_a_server_side_position_back_for_the_next_connect() {
+        let (mut machine, transport) = opened();
+        machine.handle(Input::StreamOpened(None));
+        let connected = machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{"recoverable":true,"epoch":"e","offset":1}}}}"#,
+        ));
+        for action in &connected {
+            if let Action::Emit(id, _) = action {
+                machine.handle(Input::EventTaken(*id));
+            }
+        }
+        let event = machine
+            .handle(reply(
+                transport,
+                r#"{"push":{"channel":"alerts","pub":{"data":{},"offset":2}}}"#,
+            ))
+            .iter()
+            .find_map(|action| match action {
+                Action::Emit(id, _) => Some(*id),
+                _ => None,
+            })
+            .expect("the publication's event");
+        machine.handle(Input::EventHanded(event));
+        machine.handle(Input::HandlerPanicked {
+            event,
+            message: "boom".into(),
+        });
+        let next = transport_of(&machine.handle(Input::Connect));
+
+        let opened = machine.handle(Input::TransportOpened(next));
+
+        assert_eq!(
+            connect_subs(&opened),
+            serde_json::json!({"alerts":{"recover":true,"epoch":"e","offset":1}})
+        );
+    }
+
+    // A server-side subscription emits the joins and leaves pushed to it.
+    #[test]
+    fn a_subscribed_server_side_subscription_emits_joins_and_leaves() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{}}}}"#,
+        ));
+        let info = crate::ClientInfo {
+            client: "x".into(),
+            user: "u".into(),
+            conn_info: None,
+            chan_info: None,
+        };
+        for (push, event) in [
+            ("join", ServerSubscriptionEvent::Join(info.clone())),
+            ("leave", ServerSubscriptionEvent::Leave(info)),
+        ] {
+            let actions = machine.handle(reply(
+                transport,
+                &format!(
+                    r#"{{"push":{{"channel":"alerts","{push}":{{"info":{{"client":"x","user":"u"}}}}}}}}"#
+                ),
+            ));
+
+            assert_eq!(
+                events(&actions),
+                [&ClientEvent::ServerSubscription {
+                    channel: "alerts".into(),
+                    event
+                }]
+            );
+        }
+    }
 }
