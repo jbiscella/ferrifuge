@@ -185,7 +185,9 @@ gh attestation verify ferrifuge-V.crate --repo jbiscella/ferrifuge \
   --signer-workflow jbiscella/ferrifuge/.github/workflows/release.yml --source-ref refs/tags/vV \
   --predicate-type https://cyclonedx.org/bom
 gh release verify vV --repo jbiscella/ferrifuge
+gh release download vV --repo jbiscella/ferrifuge --pattern ferrifuge-V.cdx.json
 gh release verify-asset vV ferrifuge-V.cdx.json --repo jbiscella/ferrifuge
+gh release verify-asset vV ferrifuge-V.crate --repo jbiscella/ferrifuge
 ```
 
 The SBOM lists the versions of the tagged `Cargo.lock`, for every feature

@@ -16,7 +16,7 @@ agent="ferrifuge release (github.com/${GITHUB_REPOSITORY:-jbiscella/ferrifuge})"
 local_digest="$(sha256sum "$crate" | cut -d ' ' -f 1)"
 deadline=$((SECONDS + wait))
 while :; do
-    listed="$(curl -sSfL -A "$agent" "$index" 2>/dev/null \
+    listed="$(curl -sSfL --connect-timeout 10 --max-time 30 -A "$agent" "$index" 2>/dev/null \
         | jq -r --arg v "$version" 'select(.vers == $v) | .cksum' || true)"
     if [ -n "$listed" ]; then
         break

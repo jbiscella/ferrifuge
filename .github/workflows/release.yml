@@ -124,15 +124,17 @@ jobs:
       # A re-run after the publish packages again instead (Block 69, D2).
       - name: Published already?
         id: published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
           status="$(curl -s -o /dev/null -w '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
             -A "ferrifuge release (github.com/$GITHUB_REPOSITORY)" \
-            "https://crates.io/api/v1/crates/ferrifuge/$version")"
+            "https://crates.io/api/v1/crates/ferrifuge/$VERSION")"
           case "$status" in
             404) echo "already=false" >> "$GITHUB_OUTPUT" ;;
             200) echo "already=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "crates.io answered $status for $version" >&2; exit 1 ;;
+            *) echo "crates.io answered $status for $VERSION" >&2; exit 1 ;;
           esac
 
       - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
@@ -151,10 +153,11 @@ jobs:
 
       # crates.io must serve the file attested (Block 69, D2).
       - name: crates.io serves the packaged file
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          scripts/release-digest "$version" "target/package/ferrifuge-$version.crate"
-          cp "target/package/ferrifuge-$version.crate" "$RUNNER_TEMP/assets/"
+          scripts/release-digest "$VERSION" "target/package/ferrifuge-$VERSION.crate"
+          cp "target/package/ferrifuge-$VERSION.crate" "$RUNNER_TEMP/assets/"
 
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:

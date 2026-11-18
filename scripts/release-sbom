@@ -37,4 +37,4 @@ fail() {
     || fail "metadata.component is not at $version"
 dev="$(jq -r '[.components[]?.name | select(. == "cucumber" or . == "criterion")] | join(", ")' "$sbom")"
 [ -z "$dev" ] || fail "dev-dependencies listed: $dev"
-echo "$sbom"
+echo "release-sbom: $sbom: CycloneDX 1.5, serialNumber $(jq -r .serialNumber "$sbom"), ferrifuge $version, $(jq '.components | length' "$sbom") components, Cargo.lock unchanged, no dev-dependency"
