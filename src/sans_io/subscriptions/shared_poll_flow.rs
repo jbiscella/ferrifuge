@@ -102,8 +102,9 @@ pub(in crate::sans_io) struct SharedPollFlow {
     /// tracked: it runs again once that one ends.
     // D7.
     refresh_again: bool,
-    /// The refresh deadlines and the retries scheduled in this `subscribed`
-    /// period.
+    /// The retries scheduled in this `subscribed` period, of the refresh,
+    /// the signing and the replay (the refresh's own timer is
+    /// `TimerKey::SharedPollRefresh`).
     // D7.
     timers: Vec<(SharedPollTimer, signing::Retry)>,
     /// Failures in a row of the refresh, of signing the keys without a
