@@ -194,6 +194,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --min-severity low .
 
+  # Scans the whole history for secrets (Block 70 D5). A finding fails the
+  # job; the README's "Continuous integration" says how one is settled.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_COMMIT: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e
+      GITLEAKS_ASSET: gitleaks_8.30.1_linux_x64.tar.gz
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The pre-commit hook and this job run the same gitleaks.
+      - name: Hook version
+        run: |
+          pin="rev: $GITLEAKS_COMMIT  # frozen: v$GITLEAKS_VERSION"
+          if ! grep -qF -- "$pin" .pre-commit-config.yaml; then
+            echo "::error::.pre-commit-config.yaml does not pin gitleaks v$GITLEAKS_VERSION ($GITLEAKS_COMMIT), as this job does"
+            exit 1
+          fi
+
+      - name: gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/$GITLEAKS_ASSET" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/$GITLEAKS_ASSET"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$GITLEAKS_ASSET" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$GITLEAKS_ASSET" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --exit-code 1 .
+
   # Builds with an aws-lc TLS provider (Block 6). The default ring build is
   # tested by the test job.
   providers:

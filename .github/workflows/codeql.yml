@@ -1,0 +1,90 @@
+name: codeql
+
+# CodeQL's security analysis of the crate's Rust code, uploaded to code
+# scanning (Block 70). Apart from ci.yml, so that the `security-events:
+# write` grant and this schedule stay out of it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly: the pinned CodeQL bundle fixes the queries, so a scan without a
+  # change finds nothing new.
+  schedule:
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# As ci.yml: a new push to a pull request cancels its running analysis;
+# runs on main and the weekly run are never cancelled.
+concurrency:
+  group: codeql-${{ github.event_name == 'schedule' && 'weekly' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The host target with every feature but `fips` (D2), which turns
+          # off the `not(feature = "fips")` items and needs CMake and Go.
+          # The extractor reads an empty option as one empty value, so
+          # this entry names the host target and unsets the browser cfg,
+          # which build.rs never sets here, explicitly.
+          - entry: native
+            target: x86_64-unknown-linux-gnu
+            features: __test-hooks,aws-lc-rs,browser,cookies,ring,test-util,tokio,unstable,unstable-machine,unstable-webtransport
+            cfg: -adapter_browser
+          # The browser adapter (D3), with the wasm job's features. The cfg
+          # is the one build.rs sets for this target and feature, set here
+          # because the extractor's own toolchain has no wasm32 standard
+          # library.
+          - entry: browser
+            target: wasm32-unknown-unknown
+            features: browser,test-util,unstable
+            cfg: adapter_browser
+    # The extractor's options, from the matrix only (Block 57, D4).
+    env:
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET: ${{ matrix.target }}
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_FEATURES: ${{ matrix.features }}
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: ${{ matrix.cfg }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      # A feature added to Cargo.toml must be added to the native entry's
+      # list, or this fails (D2).
+      - name: Native features
+        if: matrix.entry == 'native'
+        run: |
+          want=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ferrifuge") | .features | keys - ["default", "fips"] | join(",")')
+          have=$(tr ',' '\n' <<<"$CODEQL_EXTRACTOR_RUST_OPTION_CARGO_FEATURES" | LC_ALL=C sort | paste -sd, -)
+          if [ "$want" != "$have" ]; then
+            echo "::error::the native entry analyses '$have'; Cargo.toml's features but default and fips are '$want'"
+            exit 1
+          fi
+          echo "native entry: $have"
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: rust
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:rust/target:${{ matrix.entry }}

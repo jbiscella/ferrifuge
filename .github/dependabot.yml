@@ -27,3 +27,15 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "[deps]"
+
+  # The gitleaks hook (Block 70 D8). Its pull request fails the `secrets`
+  # job's version check until the job's version, asset digest and commit
+  # are bumped with it, by hand.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "[deps]"
