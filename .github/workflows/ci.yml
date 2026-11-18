@@ -1432,6 +1432,7 @@ jobs:
       - name: cargo publish --dry-run
         run: |
           cargo publish --dry-run
+          cargo package --no-verify
           version="$(cargo metadata --no-deps --format-version 1 --offline \
             | jq -r '.packages[] | select(.name == "ferrifuge") | .version')"
           sha256sum "target/package/ferrifuge-$version.crate"
