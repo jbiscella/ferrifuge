@@ -399,3 +399,45 @@ fn the_debug_output_of_the_anomaly_names_it() {
         r#"ReplyBeforeConnect { transport: TransportId(3), command: "subscribe" }"#
     );
 }
+
+// Block 65d: mutants of run 43982614806 the tests above let through.
+
+// A subscribe reply read before the connect reply, in the same frame,
+// leaves no reply deadline running for it.
+#[test]
+fn a_subscribe_reply_read_before_the_connect_reply_leaves_no_deadline() {
+    let (mut machine, ids) = plain(&["a"]);
+    let transport = opened(&machine.handle(Input::Connect));
+    machine.handle(Input::TransportOpened(transport));
+
+    let replied = machine.handle(frame(
+        transport,
+        concat!(
+            r#"{"id":2,"subscribe":{}}"#,
+            "\n",
+            r#"{"id":1,"connect":{"client":"c"}}"#
+        ),
+    ));
+
+    assert_eq!(subscribe_deadline(&replied, ids[0]), None, "{replied:?}");
+}
+
+// A subscribe joins the connect frame while the frame stays within the
+// cap, its separator counted.
+#[test]
+fn a_subscribe_joins_the_connect_frame_up_to_the_cap_exactly() {
+    let at = |cap: Option<usize>| {
+        let config = cap.map_or_else(Config::default, |cap| {
+            Config::default().batch_frame_bytes(cap)
+        });
+        let (mut machine, _) = subscribing(Machine::new(config), &["a"], |_| {
+            SubscriptionOptions::default()
+        });
+        let transport = opened(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport))
+    };
+    let length = sent(&at(None))[0].len();
+
+    assert_eq!(commands(&at(Some(length))), [["connect", "a"]]);
+    assert_eq!(commands(&at(Some(length - 1))), [["connect"]]);
+}
