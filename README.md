@@ -169,6 +169,29 @@ does move that requirement to a later pre-release of 1.0.0 and to
 1.0.0: an application that must not move pins it with an `=`
 requirement. From 1.0.0, only a major version breaks the covered API.
 
+## Verifying a release
+
+From the first release after 1.0.0-alpha.2, each release carries a
+CycloneDX SBOM (software bill of materials) of the crate, attached to its
+GitHub release with the `.crate` file, and two GitHub artifact
+attestations of the `.crate` crates.io serves: its build provenance and
+its SBOM. With gh 2.75.0 or later, logged in, for version `V`:
+
+```sh
+curl -sSfL -o ferrifuge-V.crate https://static.crates.io/crates/ferrifuge/ferrifuge-V.crate
+gh attestation verify ferrifuge-V.crate --repo jbiscella/ferrifuge \
+  --signer-workflow jbiscella/ferrifuge/.github/workflows/release.yml --source-ref refs/tags/vV
+gh attestation verify ferrifuge-V.crate --repo jbiscella/ferrifuge \
+  --signer-workflow jbiscella/ferrifuge/.github/workflows/release.yml --source-ref refs/tags/vV \
+  --predicate-type https://cyclonedx.org/bom
+gh release verify vV --repo jbiscella/ferrifuge
+gh release verify-asset vV ferrifuge-V.cdx.json --repo jbiscella/ferrifuge
+```
+
+The SBOM lists the versions of the tagged `Cargo.lock`, for every feature
+and target, dev-dependencies left out: not the versions an application's
+own lock resolves.
+
 ## Usage
 
 Add it to `Cargo.toml`:

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Writes the CycloneDX SBOM of the crate into <dir> and checks it
+# (Block 69, D1). Usage:
+#   scripts/release-sbom <dir> [crate directory]
+# Needs bash, cargo, cargo-cyclonedx 0.5.9 and jq.
+set -euo pipefail
+
+out="${1:?usage: release-sbom <dir> [crate directory]}"
+dir="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+cd "$dir"
+
+version="$(cargo metadata --no-deps --format-version 1 --offline \
+    | jq -r '.packages[] | select(.name == "ferrifuge") | .version')"
+name="ferrifuge-$version.cdx"
+lock_before="$(sha256sum Cargo.lock)"
+
+# Without SOURCE_DATE_EPOCH: with it, cargo-cyclonedx leaves out
+# serialNumber, which actions/attest requires.
+env -u SOURCE_DATE_EPOCH cargo cyclonedx --all-features --target all \
+    --format json --spec-version 1.5 --override-filename "$name"
+mv "$name.json" "$out/$name.json"
+sbom="$out/$name.json"
+
+fail() {
+    echo "release-sbom: $*" >&2
+    exit 1
+}
+[ "$(sha256sum Cargo.lock)" = "$lock_before" ] || fail "Cargo.lock changed"
+[ "$(jq -r '.bomFormat' "$sbom")" = CycloneDX ] || fail "bomFormat is not CycloneDX"
+[ "$(jq -r '.specVersion' "$sbom")" = 1.5 ] || fail "specVersion is not 1.5"
+[ "$(jq -r '.serialNumber // empty' "$sbom")" != "" ] || fail "no serialNumber"
+[ "$(jq -r '.metadata.component.name' "$sbom")" = ferrifuge ] \
+    || fail "metadata.component is not ferrifuge"
+[ "$(jq -r '.metadata.component.version' "$sbom")" = "$version" ] \
+    || fail "metadata.component is not at $version"
+dev="$(jq -r '[.components[]?.name | select(. == "cucumber" or . == "criterion")] | join(", ")' "$sbom")"
+[ -z "$dev" ] || fail "dev-dependencies listed: $dev"
+echo "$sbom"

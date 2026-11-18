@@ -33,6 +33,10 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
   not TLS (`wss://` for the websocket, `https://` for the others and the
   emulation endpoint), naming the scheme only when it is `ws`, `wss`,
   `http` or `https`, never the endpoint (Block 68).
+- Each release attaches a CycloneDX SBOM of the crate and the `.crate`
+  file to its GitHub release, and attests the `.crate` crates.io serves:
+  its build provenance and its SBOM; the README's "Verifying a release"
+  gives the commands (Block 69).
 
 ### Changed
 
