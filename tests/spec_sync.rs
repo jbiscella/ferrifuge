@@ -20,7 +20,7 @@ mod bug_catalogue;
 
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &[];
+const NOT_YET_IMPLEMENTED: &[&str] = &["Refusing endpoints that are not TLS"];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
@@ -35,7 +35,8 @@ const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet. A scenario
 /// leaves the list when a test claims it.
-const W_NOT_YET_WRITTEN: &[&str] = &[];
+const W_NOT_YET_WRITTEN: &[&str] =
+    &["A browser client with tls_only refuses an endpoint that is not TLS"];
 
 /// How a wasm test claims a `@W` scenario: a line of its own reading
 /// `// @W scenario: <scenario name>`.

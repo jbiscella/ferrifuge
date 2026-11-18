@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–67 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–68 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -11197,5 +11197,118 @@ Value clause: As an app developer whose deployment routes websocket clients at a
 - each scenario is seen failing once, on a mutation recorded in the pull request: no-op option; values before the encoding's; values as a second header line; selection check removed; values in `Debug`; reserved check removed;
 - the `@A` outline runs against the CI's Centrifugo;
 - the `@W` scenarios run on the `browser` jobs;
+- cargo-semver-checks reports a minor change;
+- clippy passes on every feature set.
+
+---
+
+## Block 68 — Refusing endpoints that are not TLS
+
+**Goal:** an application can make `build()` refuse every endpoint that is not TLS, so that a plain `ws://` or `http://` endpoint configured by mistake cannot carry a token in clear text. The default stays as today.
+
+Source: owner, 2026-11-17, issue #349 (low priority, a hardening option). Today `check_endpoint` (`src/adapter/builder.rs`) refuses only an empty endpoint, a websocket endpoint that is `http(s)://` and a WebTransport endpoint that is not `https://`; the emulation endpoint is not checked at build, except by the Android gate (Block 24 D5).
+
+Where this block goes beyond the issue, and why:
+- the issue names the endpoints; the emulation endpoint carries commands with tokens (`refresh`, `subscribe`, `sub_refresh`), so D2 checks it too, whenever it is set;
+- the issue asks that the error name the scheme; D2 names it only when it is `ws`, `wss`, `http` or `https`, so that text an application put before a colon (a userinfo, say) never reaches an error message (Block 21 D5).
+
+Facts this block relies on (verified while drafting and reviewing, 2026-11-18):
+- An endpoint enters a client only through `Client::builder_with_transports` (`Client::new` and `Client::builder` call it) and `ClientBuilder::emulation_endpoint`; no later call changes one, and the server sends no URL. The default emulation endpoint is `/emulation` on the stream endpoint's server, with its scheme (`body.rs` `emulation_url`).
+- Natively no redirect is followed: reqwest is built with `Policy::none()` (`net.rs`), and tokio-tungstenite's `client_async_with_config` follows none. In the browser, fetch runs with `redirect: "manual"` and a WebSocket fails on a redirect (WHATWG WebSockets); an `EventSource` follows one and cannot be told not to, though an `https://` page blocks a redirect to `http://` as mixed content.
+- An `https://` or `wss://` target behind an `http://` proxy is tunnelled with CONNECT, or through SOCKS5: TLS runs end to end (Block 23 D2, D4).
+- reqwest 0.13.5's `https_only(true)` refuses a non-`https` request, and a redirect to one, when it is sent, with an error carrying the URL (`async_impl/client.rs:2627`, `error::url_bad_scheme`). tungstenite 0.30 has no such option.
+- Cargo features unify across a dependency graph (Block 6): a feature would turn the rule on for every client in a process, test doubles included.
+
+**Dependencies:** Blocks 8 (transports and endpoint rules), 21 D5 (no URL in an error message), 23 (proxies), 24 D5 (the Android gate), 37 (`Connector`, `test_util::Server`), 44 (browser build, D18 `@W`), 48 D2 (WebTransport is `https://` only), 55 (Stability: a method added is a minor addition; `Debug` text is not covered), 60 D3, 61 D2 (the shared `ClientBuilder`).
+
+**Out of scope:**
+- the proxy's own scheme: an `http://` proxy with a TLS target keeps the token encrypted; only the proxy's own credentials reach it in clear, as Block 23 documents;
+- what an application's `Connector` or browser shim (Block 44 D12) does with the stream or URL it is given;
+- Android's cleartext policy and iOS ATS, which do not govern raw sockets;
+- the `unstable-machine` core, which opens no transport.
+
+**Decisions:**
+- **D1 Option.** `ClientBuilder::tls_only(enabled: bool)`, on the shared builder (Block 61 D2), on both targets; default `false`; a later call replaces an earlier one. The name and shape follow reqwest's `https_only(bool)`. Not a cargo feature (Block 6: features unify). A minor addition (Block 55).
+- **D2 The rule.** With `tls_only(true)`, `build()` fails when:
+  - a websocket endpoint's scheme is not `wss`;
+  - an `http_stream`, sse or WebTransport endpoint's scheme is not `https`;
+  - an emulation endpoint is set and its scheme is not `https`, whichever transports are configured.
+
+  The scheme is the text of the trimmed endpoint before its first `:`, compared ASCII-case-insensitively. The error is a configuration error (`codes::error::BAD_CONFIGURATION`). Its `transport` is the endpoint's transport, and none for the emulation endpoint, as other build errors that concern no single transport. Its message is "tls_only refuses the <name> endpoint: its scheme <scheme> is not <expected>", where `<name>` is the transport's name or `emulation`, `<scheme>` the scheme in lower case and `<expected>` `wss` or `https`. When the scheme is not `ws`, `wss`, `http` or `https`, or there is none, the message is "tls_only refuses the <name> endpoint: its scheme is not <expected>". The message never contains the URL or any other part of it.
+- **D3 Where.** One function, called by `Client::start` for both targets after the backend's checks and before anything starts. An empty endpoint, or a scheme its transport cannot use, keeps its own error (Block 8), and a client is never started with an endpoint the rule refuses.
+- **D4 Connectors and the test double.** A `Connector` does not exempt an endpoint: a `ws://` endpoint over an application's stream (a VPN, `test_util::Server`) needs `tls_only` off. The rustdoc of `tls_only`, of `ClientBuilder::connector` and of `test_util::Server::endpoint` says so.
+- **D5 Debug.** `ClientBuilder`'s `Debug` shows `tls_only`.
+- **D6 Documentation.** The option's rustdoc and the README state D2 and D4, that no redirect is followed except by a browser `EventSource`, and that the proxy's own scheme is not checked.
+- **D7 Version.** Under `## [Unreleased]`, "Added": `ClientBuilder::tls_only`.
+
+```gherkin
+Feature: Refusing endpoints that are not TLS
+
+  @D
+  Scenario Outline: With tls_only an endpoint that is not TLS fails the build
+    Given client options with tls_only and the <transport> endpoint "<endpoint>"
+    When the client is built
+    Then building fails with a configuration error of transport <transport> with message "<message>"
+
+    Examples:
+      | transport   | endpoint                                                         | message                                                                 |
+      | websocket   | ws://example.invalid/connection/websocket?token=secret-token     | tls_only refuses the websocket endpoint: its scheme ws is not wss       |
+      | websocket   | WS://example.invalid/connection/websocket?token=secret-token     | tls_only refuses the websocket endpoint: its scheme ws is not wss       |
+      | websocket   | secret-token://example.invalid/connection/websocket              | tls_only refuses the websocket endpoint: its scheme is not wss          |
+      | http_stream | http://example.invalid/connection/http_stream?token=secret-token | tls_only refuses the http_stream endpoint: its scheme http is not https |
+      | http_stream | wss://example.invalid/connection/http_stream?token=secret-token  | tls_only refuses the http_stream endpoint: its scheme wss is not https  |
+      | sse         | http://example.invalid/connection/sse?token=secret-token         | tls_only refuses the sse endpoint: its scheme http is not https         |
+
+  @D
+  Scenario Outline: With tls_only an emulation endpoint that is not TLS fails the build
+    Given client options with tls_only, the <transport> endpoint "<endpoint>" and the emulation endpoint "http://example.invalid/emulation?token=secret-token"
+    When the client is built
+    Then building fails with a configuration error of no transport with message "tls_only refuses the emulation endpoint: its scheme http is not https"
+
+    Examples:
+      | transport   | endpoint                                       |
+      | http_stream | https://example.invalid/connection/http_stream |
+      | websocket   | wss://example.invalid/connection/websocket     |
+
+  @D
+  Scenario: With tls_only a connector does not exempt a plain endpoint
+    Given a server double
+    And client options with tls_only and the double's endpoint and connector
+    When the client is built
+    Then building fails with a configuration error of transport websocket with message "tls_only refuses the websocket endpoint: its scheme ws is not wss"
+
+  @D
+  Scenario Outline: With tls_only TLS endpoints build, whatever the scheme's case
+    Given client options with tls_only and <endpoints>
+    When the client is built
+    Then the client is built
+
+    Examples:
+      | endpoints                                                                                                                                |
+      | the websocket endpoint "wss://example.invalid/connection/websocket"                                                                      |
+      | the websocket endpoint "WSS://example.invalid/connection/websocket"                                                                      |
+      | the http_stream endpoint "HTTPS://example.invalid/connection/http_stream" and the emulation endpoint "https://example.invalid/emulation" |
+      | the sse endpoint "https://example.invalid/connection/sse" and the emulation endpoint "HTTPS://example.invalid/emulation"                 |
+
+  @D
+  Scenario: Without tls_only endpoints that are not TLS build as before
+    Given client options with the websocket endpoint "ws://example.invalid/connection/websocket", the http_stream endpoint "http://example.invalid/connection/http_stream" and the emulation endpoint "http://example.invalid/emulation"
+    When the client is built
+    Then the client is built
+
+  @W
+  Scenario: A browser client with tls_only refuses an endpoint that is not TLS
+    When a browser client with tls_only and the websocket endpoint "ws://example.invalid/connection/websocket?token=secret-token" is built
+    Then building fails with a configuration error of transport websocket with message "tls_only refuses the websocket endpoint: its scheme ws is not wss"
+```
+
+**Sub-increments:** the spec PR; **68a**, D1–D7, red first.
+
+Value clause: As an app developer shipping to devices outside my control, I want the client to refuse to be built with an endpoint that is not TLS, so that a configuration mistake cannot send tokens in clear text.
+
+**Structural acceptance (68a):**
+- each scenario is seen failing once, on a mutation recorded in the pull request: option ignored; on by default; the scheme compared case-sensitively; `ws` and `http` refused instead of all but `wss` and `https` allowed; the emulation endpoint unchecked, or checked only with an HTTP transport; an unknown scheme or the URL in the message; `transport` not set; a connector exempting its endpoint;
+- unit tests of the function: a WebTransport `https://` endpoint passes (with `unstable`); whitespace around an endpoint is ignored, as `check_endpoint` ignores it; `tls_only(false)` after `tls_only(true)` builds;
+- the `@W` scenario runs on the `browser` jobs;
 - cargo-semver-checks reports a minor change;
 - clippy passes on every feature set.
