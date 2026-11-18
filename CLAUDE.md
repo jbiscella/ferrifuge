@@ -10983,9 +10983,10 @@ Source: owner, 2026-11-17 ("I want to achieve fips compliance right now"); issue
 - **D3 CI.** A job `fips-certified` in `ci.yml`, on pull requests beside `providers` and on main, following Block 57. It installs CMake and Go as `providers` does, has `timeout-minutes: 45` and its own cache key. It:
   - applies D2's commands to the committed lock in its checkout;
   - fails unless the normal-edge tree of `--no-default-features --features tokio,fips` (`cargo tree -e normal`) lists exactly one `aws-lc-fips-sys`, v0.13.11, and no `ring`;
-  - runs `cargo test --lib --no-default-features --features tokio,fips`. This includes `tls_config_uses_the_build_provider`, which asserts `fips()` on the configuration ferrifuge builds, and the Block 22 refusal of a raw configuration that is not FIPS.
+  - runs `cargo test --lib --no-default-features --features tokio,fips`. This includes `tls_config_uses_the_build_provider`, which asserts `fips()` on the configuration ferrifuge builds, and the Block 22 refusal of a raw configuration that is not FIPS;
+  - builds the `quickstart` example and fails unless `nm` lists symbols with the `aws_lc_fips_0_13_11_` prefix and none with aws-lc-sys's (`aws_lc_<major>_<minor>_<patch>_`) or of the `aws_lc_sys` crate.
 
-  The `providers` job's `fips` leg fails unless its normal-edge tree lists exactly one `aws-lc-fips-sys`, a 0.14.x, so a lock update cannot change the committed module unnoticed.
+  The `providers` job's `fips` leg fails unless its normal-edge tree lists exactly one `aws-lc-fips-sys`, a 0.14.x, so a lock update cannot change the committed module unnoticed. Its `fips` leg runs the same `nm` check, with the `aws_lc_fips_0_14_` prefix, on the `quickstart` binary that `cargo test --all-targets` builds.
 - **D4 The module test.** `fips_build_links_the_4x_fips_module` calls `aws_lc_rs::fips_version`, which aws-lc-rs 1.17.1 lacks.
   - The generation check moves to D3's tree checks. The test keeps asserting `try_fips_mode` and is renamed `fips_build_runs_in_fips_mode`.
   - A direct dev-dependency on aws-lc-fips-sys for its safe `AWSLC_VERSION_NUMBER_STRING` is rejected. Each aws-lc-fips-sys version has its own `links` name, so cargo can resolve a copy that is not the one aws-lc-rs links.
@@ -10993,7 +10994,7 @@ Source: owner, 2026-11-17 ("I want to achieve fips compliance right now"); issue
   - the committed lock: AWS-LC-FIPS 4.x, submitted to NIST, not certified (link to the CMVP modules-in-process list; #346);
   - the certified line: AWS-LC FIPS 3.1.0, certificate #5314 (link), with D2's commands in order and these notes:
     - ferrifuge is not validated itself. The certificate covers the module only, when it is built, installed and operated as its security policy says (caveat, §11.1). Its tested environments are Amazon Linux 2023 on Graviton4 and on Intel Xeon Platinum 8375C. Other environments, and whether `aws-lc-fips-sys`'s build of the bundled source meets §11.1, are for the deployer to settle with their assessor;
-    - the build also compiles the non-FIPS `aws-lc-sys`, which rustls's `aws-lc-rs` feature names; the FIPS provider does not use it;
+    - the build also compiles the non-FIPS `aws-lc-sys`, which rustls's `aws-lc-rs` feature names, but does not link it: the FIPS provider does not use it, and a `fips` binary holds no `aws-lc-sys` symbol (D3 checks both lines);
     - the chain's advisories, each with whether it applies to a ferrifuge client:
       - RUSTSEC-2026-0285 applies (handshake messages accepted across a key change; the handshake stays authenticated);
       - RUSTSEC-2026-0349 applies, because ferrifuge keeps rustls's default session resumption (a later connection can lose post-quantum key exchange; no key or authentication is compromised);
@@ -11009,6 +11010,7 @@ Source: owner, 2026-11-17 ("I want to achieve fips compliance right now"); issue
 - **D6 Version.** The next pre-release, under `## [Unreleased]`: "Changed" (the rustls minimum) and "Added" (the certified line). Releasing it is the owner's (Block 55 D9).
 
 `VERIFY:` in 66a, whether `aws-lc-sys` objects are linked into a `fips` binary or only compiled (`nm`), and word D5's note to match.
+Verified (66a, 2026-11-18, Linux x86_64, dev profile, `quickstart`): compiled, not linked. Each AWS-LC sys crate prefixes its exported symbols with its version, so any linked aws-lc-sys object would show its prefix. The binary has 2277 `aws_lc_fips_0_14_3_` symbols on the committed lock and 1550 `aws_lc_fips_0_13_11_` on the certified chain, and none with aws-lc-sys's prefix (`aws_lc_0_47_0_`, `aws_lc_0_42_0_`) on either. Other targets were not run.
 
 **Amendments to earlier blocks:**
 - **Block 6, Decisions:** "rustls `<= 0.23.43` and rustls-webpki `< 0.103.16` on every build (rustls 0.23.44+ and rustls-webpki 0.103.16 require aws-lc-rs 1.18)" becomes "rustls `<= 0.23.43` and rustls-webpki `<= 0.103.13` (rustls 0.23.44+ and rustls-webpki 0.103.14+ require aws-lc-rs 1.18)". "a FIPS build therefore uses the 4.x module" becomes "the committed lock therefore uses the 4.x module, and an application may pin the certified 3.x chain instead (Block 66)".
