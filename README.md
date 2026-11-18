@@ -2228,16 +2228,15 @@ The `codeql` workflow's `analyze` job runs CodeQL's `security-extended`
 queries on the crate's Rust code, natively and for the browser target, on
 pull requests, on `main` and weekly, and uploads its alerts to code
 scanning. The `secrets` job runs gitleaks over the whole history of every
-branch and tag and fails on any finding. To run gitleaks before each
-commit, install [pre-commit](https://pre-commit.com) and run
-`pre-commit install` in the clone; the hook pins the same gitleaks
-version as the job, and builds it with Go: an installed Go 1.21 or later fetches the 1.24 toolchain gitleaks
-needs, and with no Go installed pre-commit downloads one. A real secret
-is reported to the maintainer, who revokes it. A revoked secret, or a
-false positive, already in the history is listed in `.gitleaksignore` by
-its fingerprint, under a `#` line giving the reason; a false positive in a
-new change carries an inline `gitleaks:allow` comment with its reason
-instead.
+branch and tag and fails on any finding. To run gitleaks before each commit,
+install [pre-commit](https://pre-commit.com) and run `pre-commit install` in
+the clone; the hook pins the same gitleaks version as the job, and builds it
+with Go: an installed Go 1.21 or later fetches the 1.24 toolchain gitleaks
+needs, and with no Go installed pre-commit downloads one. A real secret is
+reported to the maintainer, who revokes it. A revoked secret, or a false
+positive, already in the history is listed in `.gitleaksignore` by its
+fingerprint, under a `#` line giving the reason; a false positive in a new
+change carries an inline `gitleaks:allow` comment with its reason instead.
 
 Repository settings these rely on, which only the owner changes: code
 scanning's default setup stays off (it would reject the workflow's
