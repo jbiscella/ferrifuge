@@ -45,4 +45,5 @@ exclude_re = [
     '^src/call\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for RpcResult>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
     '^src/map\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (MapEntry|MapUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
     '^src/shared_poll\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (SharedPollSignature|SharedPollUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
+    '^src/sans_io\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (SubscriptionOptions|ConnectData)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
 ]
