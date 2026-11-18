@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–66 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–67 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -11026,3 +11026,176 @@ Value clause: As an app developer deploying under FedRAMP, I want to build the c
 - The `providers` `fips` leg's 0.14.x check passes on the committed lock.
 
 **Exceptions introduced:** no scenario: a dependency range, a CI job, a lock check and documentation (Block 6's precedent for providers).
+
+---
+
+## Block 67 — Custom websocket subprotocols
+
+**Goal:** an application can offer its own websocket subprotocol values after the encoding's own value. A gateway that routes on `Sec-WebSocket-Protocol` before any message is read (on a tenant id, for example) can then route the client. The values reach only the websocket upgrade, never logs, error messages or `Debug` output, and the server must select the encoding's own value.
+
+Source: owner, 2026-11-18, issue #369. Today `Protocol::websocket_subprotocol()` alone sets the header: `centrifuge-protobuf`, or none for JSON. `http_headers` refuses every `Sec-WebSocket-*` name (Block 17). A `Connector` (Block 37) supplies the connection, but Ferrifuge runs the upgrade. Only the browser build's `websocket` constructor option (Block 44 D12) lets an application add values. centrifuge-js 63ed73e has no subprotocol option either (`transport_websocket.ts:29-38`): applications wrap its `websocket` constructor.
+
+Where this block goes beyond the issue, and why:
+- the issue asks that the connect fail when the server accepts none of the values; D4 also fails it when the server selects an application value, because the client's encoding then has no agreement behind it (Centrifuge decodes Protobuf only when it selected `centrifuge-protobuf`, `handler_websocket.go:211`);
+- the issue says "after the encoding's own value", but JSON has none today; D3 offers `centrifuge-json`, without which Centrifugo answers with no protocol and the handshake fails;
+- D2 reserves the two encoding values.
+
+Facts this block relies on (verified while drafting and reviewing, 2026-11-18):
+- Centrifugo v6.10.3 (centrifuge `ae446d43faf0`, `handler_websocket.go:150`, `internal/websocket/server.go:109-140`) supports `centrifuge-json` and `centrifuge-protobuf`. It reads the first `Sec-WebSocket-Protocol` line, takes the first value of the client's list that it supports, and answers with no `Sec-WebSocket-Protocol` when it supports none. Centrifugo v6.0.0's centrifuge (`66e8709d50e4`) lists both values too.
+- RFC 6455 §4.1 and §4.3:
+  - each value the request offers is a non-empty token (U+0021–U+007E, without RFC 2616 separators: the RFC 9110 `tchar` set), and the values are unique;
+  - the response carries at most one token, which the client must have offered.
+- WHATWG WebSockets §2.2 (step 11.2) fails the connection when protocols were offered and the response names none.
+- tungstenite 0.30:
+  - fails the handshake with `NoSubProtocol` or `InvalidSubProtocol` in the same cases, comparing case-sensitively;
+  - reads only the request's first `Sec-WebSocket-Protocol` line;
+  - its error messages carry no value.
+- tungstenite logs the whole upgrade request, header values included, at TRACE (`handshake/client.rs:197`; Block 21 D6).
+
+**Dependencies:** Blocks 3 (encodings), 7, 8 (transports, fallback), 17 (`http_headers`), 21 (D5 redaction, D6 the TRACE warning), 22 D2 (index convention), 37 (`Connector`, `test_util::Server`), 44 (browser build: D6 open rule, D12 `websocket` option, D18 `@W`), 55 (Stability: a method added is a minor addition, and `Debug` text is not covered), 60 D3, 61 D2 (the shared `ClientBuilder`).
+
+**Amends:**
+- Block 21 D6: the warning about tungstenite's TRACE logging also names the websocket subprotocols.
+- Block 44 D6: with custom subprotocols, the WebSocket is opened with an array of protocols (D6 below).
+
+**Out of scope:**
+- changing the values on a running client (a later block if asked);
+- the http_stream, sse and WebTransport transports, which carry no subprotocol. A routing value is not carried after a fallback to them; the documentation says so and points to `http_headers` and `emulated_headers`;
+- the server side: which value a gateway routes on is the deployment's choice.
+
+**Decisions:**
+- **D1 Option.** `ClientBuilder::websocket_subprotocols(values)`, on the shared builder (Block 61 D2), on both targets.
+  - It takes any `IntoIterator` of `Into<String>`.
+  - Each call adds its values after those of earlier calls, as `emulated_headers` does.
+  - An empty list adds nothing.
+  - The values live in the builder, not in `Config`.
+  - A minor addition (Block 55).
+- **D2 Validation, at `build()`.** Every value must:
+  - be a non-empty RFC 6455 token;
+  - not repeat an earlier value (exact comparison);
+  - not be `centrifuge-json` or `centrifuge-protobuf`, which belong to the encodings.
+
+  Otherwise `build()` fails with a configuration error ("websocket subprotocol N is not a valid token", "… repeats an earlier one" or "… is reserved for the encoding"). N is the value's 0-based index across all calls, as Block 22 D2 names a root certificate. The error never contains the value.
+- **D3 The offer.** With no value set, the upgrade is unchanged: `centrifuge-protobuf` for Protobuf, no header for JSON. `Protocol::websocket_subprotocol()` is unchanged; its rustdoc adds that a client with custom subprotocols offers `centrifuge-json` for JSON. With values set, the request carries exactly one `Sec-WebSocket-Protocol` header: the encoding's own value first (`centrifuge-protobuf`, or `centrifuge-json` for JSON), then the application's values in the order given, separated by ", ".
+- **D4 The selection.** When values are set, the attempt succeeds only if the server selects the encoding's own value. A server that selects none, or another value, fails the attempt before any frame is sent. The failure is a transport failure: an `error` event of kind transport with the message "websocket subprotocol not accepted", which names no value. Block 8's fallback and backoff then apply.
+- **D5 Redaction.** `ClientBuilder`'s `Debug` shows how many values are set, never the values. `Client`'s `Debug` stays as it is. No log record and no error message of Ferrifuge carries a value.
+- **D6 Browser.** With values set, the browser build passes the list, encoding's value first, as a JavaScript array to the WebSocket constructor. That constructor is either the page's `WebSocket` or the application's `websocket` shim; the shim then receives an array where it received a string or nothing before. After `open`, `WebSocket.protocol` must equal the encoding's value, or the attempt fails as in D4: a shim need not apply the browser's own check. With no value set, the constructor is called as today.
+- **D7 Encoding apart from the subprotocol.** Where the adapter infers the encoding from "a subprotocol is set" (`driver.rs` `frame_type`, the tokio and browser `Open` handling), it reads the encoding instead.
+- **D8 Test doubles.** The @D fake server (`tests/support/fake_server.rs`) and `test_util::Server` both select from the client's list as Centrifugo does: the first value that is `centrifuge-json` or `centrifuge-protobuf`, and no header otherwise. They use Protobuf only when they selected `centrifuge-protobuf`. The @D fake server also:
+  - records each upgrade's `Sec-WebSocket-Protocol` lines;
+  - can be told to answer with a given value, or with none.
+
+  `test_util::Server` gains no public method.
+- **D9 Documentation.** The option's rustdoc and the README state:
+  - D2, D3 and D4;
+  - that the values are not carried after a fallback to the HTTP transports;
+  - the TRACE warning (Block 21 D6).
+- **D10 Version.** Under `## [Unreleased]`, "Added": `ClientBuilder::websocket_subprotocols`, and `test_util::Server` selecting `centrifuge-json` when it is offered.
+
+```gherkin
+Feature: Custom websocket subprotocols
+
+  @D
+  Scenario Outline: Without custom subprotocols the upgrade is unchanged
+    Given a fake server that records the websocket subprotocols offered
+    And a client with the <protocol> protocol and no websocket subprotocols
+    When connect is called
+    Then the client emits "connected"
+    And the upgrade request carried <header>
+
+    Examples:
+      | protocol | header                                                  |
+      | JSON     | no Sec-WebSocket-Protocol header                        |
+      | Protobuf | one Sec-WebSocket-Protocol header "centrifuge-protobuf" |
+
+  @D
+  Scenario Outline: Custom subprotocols are offered after the encoding's own value
+    Given a fake server that records the websocket subprotocols offered
+    And a client with the <protocol> protocol, given websocket subprotocol "tenant-a" in one call and "region-1" in a later one
+    When connect is called
+    Then the client emits "connected"
+    And the upgrade request carried one Sec-WebSocket-Protocol header "<offer>"
+    And the fake server selected "<selected>"
+
+    Examples:
+      | protocol | offer                                   | selected            |
+      | JSON     | centrifuge-json, tenant-a, region-1     | centrifuge-json     |
+      | Protobuf | centrifuge-protobuf, tenant-a, region-1 | centrifuge-protobuf |
+
+  @A
+  Scenario Outline: A client offering custom subprotocols connects to Centrifugo
+    Given a client configured with the <protocol> protocol and websocket subprotocol "tenant-a", with a subscription to channel "news"
+    When connect is called
+    And the subscription is subscribed
+    Then the client emits "connected" over transport "websocket"
+    And a publication to channel "news" is received
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario Outline: A server that does not select the encoding's subprotocol fails the attempt
+    Given a fake server that answers the websocket upgrade with <answer>
+    And a client with websocket subprotocol "tenant-a"
+    When connect is called
+    Then the client emits an "error" event of kind transport with message "websocket subprotocol not accepted"
+    And the client state is "connecting"
+    And the fake server received no connect command
+
+    Examples:
+      | answer                   |
+      | the subprotocol tenant-a |
+      | no subprotocol           |
+
+  @D
+  Scenario Outline: A subprotocol that is not a valid, unique application value fails the build
+    Given client options with websocket subprotocols <values>
+    When the client is built
+    Then building fails with a configuration error naming websocket subprotocol <index> and containing none of the values
+
+    Examples:
+      | values                     | index |
+      | "tenant a"                 | 0     |
+      | "a", "b,c"                 | 1     |
+      | "a", ""                    | 1     |
+      | "a", "b", "a"              | 2     |
+      | "tenänt"                   | 0     |
+      | "centrifuge-json"          | 0     |
+      | "a", "centrifuge-protobuf" | 1     |
+
+  @D
+  Scenario: Subprotocol values appear in no Debug output and no log record
+    Given a client with websocket subprotocol "tenant-secret-42", its log records captured
+    When connect is called and the client connects to the fake server
+    Then the builder's Debug output shows 1 websocket subprotocol and does not contain "tenant-secret-42"
+    And the client's Debug output does not contain "tenant-secret-42"
+    And the client's span holds TRACE records of inputs, actions, and frames sent and received
+    And no record contains "tenant-secret-42"
+
+  @W
+  Scenario: A browser client offers its custom subprotocols after the encoding's own value
+    Given a browser client with the JSON protocol, websocket subprotocol "tenant-a" and a WebSocket shim that records its arguments and constructs the page's WebSocket
+    When connect is called
+    Then the client emits "connected" over transport "websocket"
+    And the shim was called with the subprotocols "centrifuge-json" and "tenant-a", in that order, as an array
+
+  @W
+  Scenario: A browser socket reporting another subprotocol fails the attempt
+    Given a browser client with websocket subprotocol "tenant-a" and a WebSocket shim whose socket's protocol property reads "tenant-a"
+    When connect is called
+    Then the client emits an "error" event of kind transport with message "websocket subprotocol not accepted"
+    And the client state is "connecting"
+```
+
+**Sub-increments:** the spec PR; **67a**, D1–D10, red first.
+
+Value clause: As an app developer whose deployment routes websocket clients at a gateway by subprotocol, I want to add my own subprotocol values to the upgrade, so that native and browser clients reach the right backend as centrifuge-js clients do.
+
+**Structural acceptance (67a):**
+- each scenario is seen failing once, on a mutation recorded in the pull request: no-op option; values before the encoding's; values as a second header line; selection check removed; values in `Debug`; reserved check removed;
+- the `@A` outline runs against the CI's Centrifugo;
+- the `@W` scenarios run on the `browser` jobs;
+- cargo-semver-checks reports a minor change;
+- clippy passes on every feature set.
