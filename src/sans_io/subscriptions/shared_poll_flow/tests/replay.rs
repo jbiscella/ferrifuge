@@ -745,3 +745,28 @@ fn an_accepted_track_starts_the_replay_backoff_over() {
 
     assert_eq!(retries_set(&machine, &failed)[0].1, want, "{failed:?}");
 }
+
+// A frame of a replay accepted while later frames of it are still queued
+// does not start the backoff over: the request is not yet accepted whole.
+#[test]
+fn a_replay_frame_accepted_before_the_others_keeps_the_backoff() {
+    let (mut machine, transport, _, replay) = replaying(1000, 30, 5);
+    machine.rng = fastrand::Rng::with_seed(7);
+    let mut first = requests(&replay, 1)[0].clone();
+    for _ in 0..2 {
+        let failed = machine.handle(failing(transport, &first, 500, true));
+        let (timer, _) = retries_set(&machine, &failed)[0];
+        first = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1)[0].clone();
+    }
+    let second = requests(&machine.handle(reply_to(transport, &first)), 1)[0].clone();
+    let want = crate::backoff::delay(
+        2,
+        Duration::from_secs(1),
+        Duration::from_secs(15),
+        &mut machine.rng.clone(),
+    );
+
+    let failed = machine.handle(failing(transport, &second, 500, true));
+
+    assert_eq!(retries_set(&machine, &failed)[0].1, want, "{failed:?}");
+}
