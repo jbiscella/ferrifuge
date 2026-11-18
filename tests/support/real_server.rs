@@ -70,6 +70,15 @@ pub(crate) async fn docker(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Now, as Docker's `--since` and `--until` take it (Unix seconds and
+/// nanoseconds).
+fn docker_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}", now.as_secs(), now.subsec_nanos())
+}
+
 /// A free TCP port on the loopback interface, to publish a container on.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -327,42 +336,69 @@ impl Environment {
         } else {
             [&["kill", "-s", "KILL", container], &["start", container]]
         };
-        let done = std::sync::Mutex::new(Vec::new());
+        let since = docker_now();
+        let mut done = Vec::new();
         let restarted = tokio::time::timeout(RESTART_WITHIN, async {
             for args in commands {
+                let at = docker_now();
                 let began = tokio::time::Instant::now();
                 docker(args).await?;
-                done.lock()
-                    .unwrap()
-                    .push(format!("{} {:?}", args[0], began.elapsed()));
+                done.push(format!("{} at {at} took {:?}", args[0], began.elapsed()));
             }
             Ok::<_, String>(())
         })
         .await;
         let Ok(restarted) = restarted else {
-            let done = done.into_inner().unwrap_or_default();
             let stalled = commands.get(done.len()).map_or("", |args| args[0]);
-            let state = tokio::time::timeout(
-                Duration::from_secs(10),
-                docker(&[
-                    "inspect",
-                    "-f",
-                    "{{.State.Status}}, started {{.State.StartedAt}}, finished {{.State.FinishedAt}}, exit {{.State.ExitCode}} {{.State.Error}}",
-                    container,
-                ]),
-            )
-            .await
-            .map_or_else(|_| "docker inspect timed out".to_owned(), |state| {
-                state.unwrap_or_else(|error| error)
-            });
             return Err(format!(
                 "docker did not restart the server within {RESTART_WITHIN:?}: done {done:?}, \
-                 stalled in `docker {stalled}`; the container: {state}"
+                 stalled in `docker {stalled}`; {}",
+                self.daemon_view(&since).await
             ));
         };
-        restarted?;
+        restarted.map_err(|error| format!("{error}; done {done:?}"))?;
         self.wait_ready(RESTART_WITHIN.saturating_sub(start.elapsed()))
             .await
+            .map_err(|error| format!("{error}; docker done {done:?}"))
+    }
+
+    /// What Docker says of the Centrifugo container since `since`, for a
+    /// restart past its bound: its state, and the daemon's own timeline of
+    /// it (kill, die, stop, start), which tells a stalled CLI or API from a
+    /// stalled container. Each command bounded at 10 s (reviewer).
+    async fn daemon_view(&self, since: &str) -> String {
+        let bounded = |args: Vec<String>| async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tokio::time::timeout(Duration::from_secs(10), docker(&args))
+                .await
+                .map_or_else(|_| "timed out".to_owned(), |out| out.unwrap_or_else(|e| e))
+        };
+        let state = bounded(vec![
+            "inspect".into(),
+            "-f".into(),
+            "{{.State.Status}}, pid {{.State.Pid}}, started {{.State.StartedAt}}, finished \
+             {{.State.FinishedAt}}, exit {{.State.ExitCode}}, oom {{.State.OOMKilled}}, \
+             restarts {{.RestartCount}} {{.State.Error}}"
+                .into(),
+            self.centrifugo.clone(),
+        ])
+        .await;
+        let events = bounded(vec![
+            "events".into(),
+            "--since".into(),
+            since.to_owned(),
+            "--until".into(),
+            docker_now(),
+            "--filter".into(),
+            format!("container={}", self.centrifugo),
+            "--format".into(),
+            "{{.TimeNano}} {{.Action}}".into(),
+        ])
+        .await;
+        format!(
+            "the container: {state}; its events: {}",
+            events.replace('\n', ", ")
+        )
     }
 
     /// The engine the environment was started with (D6).
