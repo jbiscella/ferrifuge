@@ -128,10 +128,8 @@ impl Machine {
         for command in held {
             let (command, calls, call) = match command {
                 HeldCommand::Call(id) => {
-                    if !self.is_held(id) {
-                        // Settled or abandoned meanwhile.
-                        continue;
-                    }
+                    // A call settled or abandoned meanwhile is gone: no
+                    // command.
                     match self.release_held(id, frame.calls) {
                         Some((command, calls)) => (command, calls, Some(id)),
                         None => continue,

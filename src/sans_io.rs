@@ -2118,7 +2118,9 @@ impl Machine {
                 // when the close is read (Block 13).
                 self.fail_sent_calls();
                 // A server's close comes after the messages read before it.
-                if self.holds_messages_of(transport) || self.events_hold_inbound() {
+                // After every input, a message of the current transport is
+                // held only while an event waits (`handle_inbound`).
+                if self.events_hold_inbound() {
                     self.transport_closed_in_order(transport, code, reason);
                 } else {
                     self.transport_closed(code, &reason);
@@ -2127,7 +2129,9 @@ impl Machine {
             Input::MessageTooLarge(transport) if self.is_current(transport) => {
                 self.fail_sent_calls();
                 // After the messages read before it, as a close (Block 15).
-                if self.holds_messages_of(transport) || self.events_hold_inbound() {
+                // After every input, a message of the current transport is
+                // held only while an event waits (`handle_inbound`).
+                if self.events_hold_inbound() {
                     self.message_too_large_in_order(transport);
                 } else {
                     self.message_too_large();
