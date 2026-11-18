@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Checks that crates.io serves the packaged .crate of <version>: waits
+# for the sparse index to list it, then compares its cksum with the
+# file's SHA-256 (Block 69, D2). Usage:
+#   scripts/release-digest <version> <crate file>
+# Needs bash, curl, jq and sha256sum. FERRIFUGE_INDEX_URL overrides the
+# index file's URL, and FERRIFUGE_DIGEST_WAIT the seconds it waits (300).
+set -euo pipefail
+
+version="${1:?usage: release-digest <version> <crate file>}"
+crate="${2:?usage: release-digest <version> <crate file>}"
+index="${FERRIFUGE_INDEX_URL:-https://index.crates.io/fe/rr/ferrifuge}"
+wait="${FERRIFUGE_DIGEST_WAIT:-300}"
+agent="ferrifuge release (github.com/${GITHUB_REPOSITORY:-jbiscella/ferrifuge})"
+
+local_digest="$(sha256sum "$crate" | cut -d ' ' -f 1)"
+deadline=$((SECONDS + wait))
+while :; do
+    listed="$(curl -sSfL -A "$agent" "$index" 2>/dev/null \
+        | jq -r --arg v "$version" 'select(.vers == $v) | .cksum' || true)"
+    if [ -n "$listed" ]; then
+        break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "release-digest: the index does not list $version after ${wait} s" >&2
+        exit 1
+    fi
+    sleep 10
+done
+if [ "$listed" != "$local_digest" ]; then
+    echo "release-digest: crates.io serves $listed for $version, the packaged file is $local_digest" >&2
+    exit 1
+fi
+echo "release-digest: $version is $local_digest"
