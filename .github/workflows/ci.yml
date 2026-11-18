@@ -1432,7 +1432,9 @@ jobs:
       - name: cargo publish --dry-run
         run: |
           cargo publish --dry-run
-          sha256sum target/package/ferrifuge-*.crate
+          version="$(cargo metadata --no-deps --format-version 1 --offline \
+            | jq -r '.packages[] | select(.name == "ferrifuge") | .version')"
+          sha256sum "target/package/ferrifuge-$version.crate"
 
   # The documentation as docs.rs builds it (Block 20, D7): nightly, with the
   # docsrs cfg that shows which items need which feature, natively and for
