@@ -3758,6 +3758,24 @@ mod tests {
         );
     }
 
+    // Block 65b: each resubscribe delay option sets its own field only.
+    #[test]
+    fn the_resubscribe_delay_options_set_only_their_fields() {
+        let options = SubscriptionOptions::default()
+            .token("t".into())
+            .min_resubscribe_delay(Duration::from_millis(7))
+            .max_resubscribe_delay(Duration::from_millis(9));
+
+        assert_eq!(
+            (
+                options.min_resubscribe_delay,
+                options.max_resubscribe_delay,
+                options.token.as_str()
+            ),
+            (Duration::from_millis(7), Duration::from_millis(9), "t")
+        );
+    }
+
     #[test]
     fn the_last_data_option_decides() {
         let fixed = SubscriptionOptions::default()
