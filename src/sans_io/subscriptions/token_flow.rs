@@ -237,7 +237,9 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        if !sub.tokens.take_refresh_reply(reply.id) || sub.state != SubscriptionState::Subscribed {
+        // A sub_refresh in flight is its subscription's refresh command,
+        // while subscribed: leaving Subscribed ends both.
+        if !sub.tokens.take_refresh_reply(reply.id) {
             return;
         }
         match (reply.error, reply.result) {

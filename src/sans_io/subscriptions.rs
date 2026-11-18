@@ -310,9 +310,10 @@ impl Subscriptions {
             .any(|(_, pending)| pending == channel)
     }
 
-    /// Removes the entry of `compact_id` when it still names `id`.
+    /// Removes the entry of `compact_id` when it still names `id`; 0, no
+    /// id, is never an entry (`map_compact_id`).
     fn forget_compact_id(&mut self, id: SubscriptionId, compact_id: i64) {
-        if compact_id > 0 && self.by_compact_id.get(&compact_id) == Some(&id) {
+        if self.by_compact_id.get(&compact_id) == Some(&id) {
             self.by_compact_id.remove(&compact_id);
         }
     }
@@ -774,11 +775,6 @@ impl Machine {
             .retain(|(sent, _)| *sent != command);
     }
 
-    /// Whether `command` is a subscribe command awaiting its reply.
-    pub(super) fn awaits_subscribe(&self, command: u32) -> bool {
-        self.subscriptions.subscribes.contains_key(&command)
-    }
-
     fn send_unsubscribe(&mut self, id: SubscriptionId, channel: String) {
         let Some(transport) = self.transport.filter(|_| self.state == State::Connected) else {
             return;
@@ -963,9 +959,13 @@ impl Machine {
                     id,
                     SubscriptionTimer::RefreshReply,
                 )));
-            let current = self.subscriptions.by_id.get_mut(&id).is_some_and(|sub| {
-                sub.tokens.take_refresh_reply(command) && sub.state == SubscriptionState::Subscribed
-            });
+            // A sub_refresh in flight is its subscription's refresh
+            // command, while subscribed: leaving Subscribed ends both.
+            let current = self
+                .subscriptions
+                .by_id
+                .get_mut(&id)
+                .is_some_and(|sub| sub.tokens.take_refresh_reply(command));
             if current {
                 self.set_unsubscribed(
                     id,
