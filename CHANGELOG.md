@@ -22,6 +22,13 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
   the RustSec advisories that chain carries and what the certificate
   covers; CI builds and tests the `fips` build on that chain (Block 66, D2,
   D3, D5).
+- `ClientBuilder::websocket_subprotocols` adds values of the application's
+  own to the websocket upgrade, after the encoding's value
+  (`centrifuge-json` for JSON once values are set); the server must select
+  the encoding's value, and the values appear in no log record, error or
+  `Debug` output (Block 67).
+- `test_util::Server` selects `centrifuge-json` when a client offers it, as
+  Centrifugo does (Block 67, D8).
 
 ### Changed
 

@@ -27,6 +27,9 @@ use crate::{CallError, ConnectedStream, Connector, StreamPosition};
 const ENDPOINT: &str = "ws://ferrifuge-double.invalid/connection/websocket";
 /// The websocket subprotocol of the Protobuf encoding.
 const PROTOBUF: &str = "centrifuge-protobuf";
+/// The websocket subprotocol of the JSON encoding, which Centrifugo
+/// selects when a client offers it.
+const JSON: &str = "centrifuge-json";
 /// The epoch of every channel's stream.
 const EPOCH: &str = "double";
 
@@ -393,17 +396,23 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
     )]
     let accepted =
         tokio_tungstenite::accept_hdr_async(stream, |request: &Request, mut response: Response| {
-            protobuf = request
+            // As Centrifugo: the first value of the first line it supports
+            // (Block 67, D8).
+            let selected = request
                 .headers()
-                .get_all("sec-websocket-protocol")
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .flat_map(|value| value.split(','))
-                .any(|protocol| protocol.trim() == PROTOBUF);
-            if protobuf {
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|line| {
+                    line.split(',')
+                        .map(str::trim)
+                        .find(|value| *value == PROTOBUF || *value == JSON)
+                })
+                .map(|value| if value == PROTOBUF { PROTOBUF } else { JSON });
+            protobuf = selected == Some(PROTOBUF);
+            if let Some(selected) = selected {
                 response
                     .headers_mut()
-                    .insert("sec-websocket-protocol", HeaderValue::from_static(PROTOBUF));
+                    .insert("sec-websocket-protocol", HeaderValue::from_static(selected));
             }
             Ok(response)
         })

@@ -43,6 +43,10 @@ pub struct ClientBuilder {
     pub(super) emulation_endpoint: Option<String>,
     /// Emulated headers, as given; checked by [`ClientBuilder::build`].
     pub(super) emulated_headers: Vec<(String, String)>,
+    /// The application's websocket subprotocols, as given; checked by
+    /// [`ClientBuilder::build`].
+    // Block 67.
+    pub(super) websocket_subprotocols: Vec<String>,
     /// The client's handler, set once it is built; behind a mutex so that
     /// the builder stays `Sync` for a handler that is only `Send`.
     // Block 41b.
@@ -94,6 +98,8 @@ impl std::fmt::Debug for ClientBuilder {
                 &self.emulation_endpoint.as_deref().map(log::endpoint),
             )
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
+            // How many, never the values (Block 67, D5).
+            .field("websocket_subprotocols", &self.websocket_subprotocols.len())
             .field("handler", &self.handler.is_some())
             .field("event_delivery", &self.event_delivery);
         self.backend.fields(&mut f);
@@ -158,6 +164,39 @@ impl ClientBuilder {
                 .into_iter()
                 .map(|(name, value)| (name.into(), value.into())),
         );
+        self
+    }
+
+    /// Adds websocket subprotocols, offered in the websocket upgrade after
+    /// the encoding's own value, for example for a gateway that routes on
+    /// `Sec-WebSocket-Protocol` before any message is read. Each call adds
+    /// its values after those of earlier calls.
+    ///
+    /// With values set, the upgrade carries one `Sec-WebSocket-Protocol`
+    /// header: `centrifuge-protobuf`, or `centrifuge-json` for JSON (which
+    /// Centrifugo selects), then these values in order. The server must
+    /// select the encoding's own value: a server that selects none, or one
+    /// of these, fails the attempt as a transport failure, "websocket
+    /// subprotocol not accepted", and the next transport is tried. The
+    /// HTTP transports and WebTransport carry no subprotocol: after a
+    /// fallback to them the values are not sent; `http_headers` and
+    /// `emulated_headers` reach them.
+    ///
+    /// Each value must be an RFC 6455 token, not repeat an earlier one, and
+    /// not be `centrifuge-json` or `centrifuge-protobuf`, or
+    /// [`ClientBuilder::build`] fails, naming the value's index (from 0,
+    /// across calls), never the value. No log record, error message or
+    /// `Debug` output of the client carries a value; at the TRACE level,
+    /// the websocket library logs the whole upgrade request, these values
+    /// included.
+    #[must_use]
+    pub fn websocket_subprotocols<I, V>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<String>,
+    {
+        self.websocket_subprotocols
+            .extend(values.into_iter().map(Into::into));
         self
     }
 
@@ -233,10 +272,12 @@ impl Client {
             get_data,
             emulation_endpoint,
             emulated_headers,
+            websocket_subprotocols,
             handler: _,
             event_delivery,
             backend,
         } = builder;
+        super::subprotocols::check(&websocket_subprotocols)?;
         let super::backend::Started {
             shared: backend_shared,
             driver: backend_driver,
@@ -244,7 +285,7 @@ impl Client {
         } = backend.start(&endpoints, emulation_endpoint.as_deref(), &config)?;
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
-        let subprotocol = config.protocol.websocket_subprotocol();
+        let offer = super::subprotocols::Offer::new(config.protocol, &websocket_subprotocols);
         let timeout = config.timeout;
         let max_message = config.max_message_bytes;
         let machine = machine_for(
@@ -284,7 +325,7 @@ impl Client {
                 .into_iter()
                 .map(|(_, endpoint)| endpoint)
                 .collect(),
-            subprotocol,
+            offer,
             emulation_endpoint,
             timeout,
             max_message,

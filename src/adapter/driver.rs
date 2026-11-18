@@ -46,8 +46,8 @@ type Fetching = platform::BoxFuture<'static, Result<String, TokenError>>;
 pub(super) struct Driver {
     /// Endpoints of the transports, in the machine's order.
     pub(super) endpoints: Vec<String>,
-    /// Websocket subprotocol of the configured encoding, if it needs one.
-    pub(super) subprotocol: Option<&'static str>,
+    /// The websocket subprotocols offered, and the encoding (Block 67).
+    pub(super) offer: super::subprotocols::Offer,
     /// Where commands over emulated transports go, when not the default.
     pub(super) emulation_endpoint: Option<String>,
     /// Time allowed for an emulation request, and for writing a websocket
@@ -673,7 +673,7 @@ impl Driver {
 
     /// How frames travel with the configured encoding.
     fn frame_type(&self) -> FrameType {
-        if self.subprotocol.is_some() {
+        if self.offer.protobuf {
             FrameType::Binary
         } else {
             FrameType::Text
@@ -710,7 +710,7 @@ impl Driver {
             kind,
             endpoint,
             url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
-            subprotocol: self.subprotocol,
+            offer: self.offer.clone(),
             timeout: self.timeout,
             max_message: self.max_message,
             headers: self.backend.http_headers.clone(),
@@ -733,7 +733,7 @@ impl Driver {
             kind,
             endpoint,
             url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
-            subprotocol: self.subprotocol,
+            offer: self.offer.clone(),
             timeout: self.timeout,
             max_message: self.max_message,
             read_ahead: self.backend.read_ahead,

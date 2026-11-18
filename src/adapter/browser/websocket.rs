@@ -304,14 +304,14 @@ pub(in crate::adapter) struct WebSocket {
 
 impl WebSocket {
     /// Opens a connection to `url` with `constructor`, the page's
-    /// `WebSocket` or its shim, asking for `subprotocol` if any. A
+    /// `WebSocket` or its shim, offering the subprotocols of `offer`. A
     /// message over `max_message` bytes ends it, reported as
     /// [`Inbound::TooLarge`]; one that would take the inbox past `bound`
     /// ends it too, reported as [`Inbound::Overflow`].
     pub(in crate::adapter) async fn open(
         constructor: &Function,
         url: &str,
-        subprotocol: Option<&str>,
+        offer: &crate::adapter::subprotocols::Offer,
         timeout: Duration,
         max_message: usize,
         bound: Bound,
@@ -319,11 +319,19 @@ impl WebSocket {
         // A constructor that throws is a failed attempt (D6). A shim's
         // object is used through web-sys's bindings, which call its methods
         // and properties by name (D12).
-        let arguments = match subprotocol {
-            Some(subprotocol) => {
-                Array::of2(&JsValue::from_str(url), &JsValue::from_str(subprotocol))
-            }
-            None => Array::of1(&JsValue::from_str(url)),
+        // With the application's values, an array of every value, the
+        // encoding's first; without, as before (Block 67, D6).
+        let url_value = JsValue::from_str(url);
+        let arguments = match offer.values() {
+            [] => Array::of1(&url_value),
+            [only] if !offer.custom() => Array::of2(&url_value, &JsValue::from_str(only)),
+            values => Array::of2(
+                &url_value,
+                &values
+                    .iter()
+                    .map(|value| JsValue::from_str(value))
+                    .collect::<Array>(),
+            ),
         };
         let websocket: web_sys::WebSocket = Reflect::construct(constructor, &arguments)
             .map_err(|error| TransportFailure::other(js_message(&error)))?
@@ -354,6 +362,14 @@ impl WebSocket {
             }
         })
         .await?;
+        // A shim need not apply the browser's own check: the encoding's
+        // value must be the one selected (Block 67, D6).
+        let selected = socket.websocket.protocol();
+        if !offer.accepts(Some(selected.as_str()).filter(|selected| !selected.is_empty())) {
+            return Err(TransportFailure::other(
+                crate::adapter::subprotocols::NOT_ACCEPTED,
+            ));
+        }
         Ok(Self {
             socket,
             written: VecDeque::new(),

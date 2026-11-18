@@ -38,8 +38,8 @@ pub(in crate::adapter) struct Open {
     /// The endpoint's index, for the records.
     pub(in crate::adapter) endpoint: usize,
     pub(in crate::adapter) url: String,
-    /// Websocket subprotocol of the configured encoding, if it needs one.
-    pub(in crate::adapter) subprotocol: Option<&'static str>,
+    /// The websocket subprotocols offered, and the encoding (Block 67).
+    pub(in crate::adapter) offer: super::subprotocols::Offer,
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) max_message: usize,
     /// The bound of the inbox: the read-ahead's own.
@@ -63,7 +63,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         kind,
         endpoint,
         url,
-        subprotocol,
+        offer,
         timeout,
         max_message,
         read_ahead,
@@ -84,7 +84,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         // The page's own WebTransport, no shim (Block 48, D17).
         #[cfg(feature = "unstable")]
         TransportKind::WebTransport => {
-            let protobuf = subprotocol.is_some();
+            let protobuf = offer.protobuf;
             Box::pin(async move {
                 if !found.webtransport {
                     return Err(missing());
@@ -96,19 +96,12 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         }
         TransportKind::WebSocket => Box::pin(async move {
             let constructor = found.websocket.ok_or_else(missing)?;
-            WebSocket::open(
-                &constructor,
-                &url,
-                subprotocol,
-                timeout,
-                max_message,
-                read_ahead,
-            )
-            .await
-            .map(|websocket| Transport::WebSocket(Box::new(websocket)))
+            WebSocket::open(&constructor, &url, &offer, timeout, max_message, read_ahead)
+                .await
+                .map(|websocket| Transport::WebSocket(Box::new(websocket)))
         }),
         TransportKind::HttpStream => {
-            let protobuf = subprotocol.is_some();
+            let protobuf = offer.protobuf;
             Box::pin(async move {
                 HttpStream::open(
                     found.fetch.ok_or_else(missing)?,

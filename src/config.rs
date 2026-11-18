@@ -152,7 +152,9 @@ pub enum Protocol {
 
 impl Protocol {
     /// The websocket subprotocol a transport requests for this encoding;
-    /// `None` for JSON, which needs none.
+    /// `None` for JSON, which needs none. A client with websocket
+    /// subprotocols of its own (`ClientBuilder::websocket_subprotocols`)
+    /// offers `centrifuge-json` for JSON.
     #[must_use]
     pub fn websocket_subprotocol(self) -> Option<&'static str> {
         match self {

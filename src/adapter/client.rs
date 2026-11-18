@@ -169,6 +169,7 @@ impl Client {
             get_data: None,
             emulation_endpoint: None,
             emulated_headers: Vec::new(),
+            websocket_subprotocols: Vec::new(),
             handler: None,
             event_delivery: super::EventDelivery::default(),
             backend: super::backend::Options::default(),
