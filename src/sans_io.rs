@@ -2402,9 +2402,10 @@ impl Machine {
                 }
             }
             Timer::ServerPing => {
-                // Paused while the read-ahead is full (Block 15): a timer
-                // that fired before its cancellation was performed is stale.
-                if self.state == State::Connected && self.wants_frames() {
+                // Paused while the read-ahead is full (Block 15): it is
+                // cancelled when the read-ahead fills, and a firing of a
+                // cancelled setting never gets here (Block 53).
+                if self.state == State::Connected {
                     self.disconnect(codes::connecting::NO_PING, "no ping", true);
                 }
             }
@@ -2443,10 +2444,10 @@ impl Machine {
         if self.connect_data.fetch != Some(fetch) {
             return;
         }
+        // Pending only while connecting with no transport: it starts in
+        // `token_ready`, nothing opens a transport meanwhile, and a
+        // teardown takes it.
         self.connect_data.fetch = None;
-        if self.state != State::Connecting || self.transport.is_some() {
-            return;
-        }
         match result {
             // A refresh that came due while the callback ran, e.g. after a
             // sleep, needs a new token first; the data callback then runs
@@ -2763,15 +2764,9 @@ impl Machine {
                 ReplyResult::Push(Push::Leave { channel, id, info }) => {
                     self.join_or_leave(&channel, id, info, false);
                 }
-                // An empty reply is a server ping (client.proto, Reply).
-                ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
-                    // A ping proves the connection usable (centrifuge-js
-                    // `_handleServerPing`).
-                    self.reset_backoff_if_pending();
-                    if self.pings.is_some_and(|pings| pings.pong) {
-                        self.pong();
-                    }
-                }
+                // An empty reply with no error is a server ping (client.proto,
+                // Reply), answered as it is read (`inbound.rs`, `ping_read`):
+                // none gets here.
                 _ => {}
             }
             return;
@@ -3358,8 +3353,9 @@ impl Machine {
                             self.token_ready();
                         }
                     }
-                    FetchPurpose::Refresh if self.state == State::Connected => self.send_refresh(),
-                    FetchPurpose::Refresh => {}
+                    // A refresh fetch is pending only while connected: a
+                    // teardown makes it stale (`Tokens::teardown`).
+                    FetchPurpose::Refresh => self.send_refresh(),
                 }
             }
             Err(TokenError::Failed(message)) => match purpose {
@@ -3378,8 +3374,9 @@ impl Machine {
                         self.set_timer(Timer::Reconnect, delay);
                     }
                 }
-                // Reconnecting: the next connection gets its own refresh timer.
-                FetchPurpose::Refresh if self.state != State::Connected => {}
+                // Only while connected: a teardown makes a refresh fetch
+                // stale (`Tokens::teardown`), and the next connection gets
+                // its own refresh timer.
                 FetchPurpose::Refresh => {
                     self.emit(ClientEvent::Error(ClientError {
                         kind: ErrorKind::RefreshToken,
@@ -5274,6 +5271,10 @@ mod tests {
 
     // Every input naming a transport the machine abandoned changes
     // nothing, the counters included.
+    /// An input naming a stale transport, given the current connect
+    /// command's frame id and bytes.
+    type Stale = fn(TransportId, FrameId, Vec<u8>) -> Input;
+
     #[test]
     fn every_input_about_an_abandoned_transport_is_ignored() {
         let abandoned = || {
@@ -5290,27 +5291,27 @@ mod tests {
                 .expect("the connect command on the current transport");
             (machine, stale, id, sent)
         };
-        let inputs: Vec<Box<dyn Fn(TransportId, FrameId, Vec<u8>) -> Input>> = vec![
-            Box::new(|stale, _, _| Input::TransportOpened(stale)),
-            Box::new(|stale, _, _| Input::TransportFailed {
+        let inputs: [Stale; 7] = [
+            |stale, _, _| Input::TransportOpened(stale),
+            |stale, _, _| Input::TransportFailed {
                 transport: stale,
                 message: "refused".into(),
-            }),
-            Box::new(|stale, _, _| Input::TransportClosed {
+            },
+            |stale, _, _| Input::TransportClosed {
                 transport: stale,
                 code: None,
                 reason: String::new(),
-            }),
-            Box::new(|stale, _, _| Input::MessageTooLarge(stale)),
-            Box::new(|stale, _, sent| Input::SendRejected {
+            },
+            |stale, _, _| Input::MessageTooLarge(stale),
+            |stale, _, sent| Input::SendRejected {
                 transport: stale,
                 frame: sent,
-            }),
-            Box::new(|stale, id, _| Input::FrameWritten {
+            },
+            |stale, id, _| Input::FrameWritten {
                 transport: stale,
                 frame: id,
-            }),
-            Box::new(|stale, _, _| frame(stale, r#"{"id":1,"connect":{"client":"c"}}"#)),
+            },
+            |stale, _, _| frame(stale, r#"{"id":1,"connect":{"client":"c"}}"#),
         ];
         for (n, input) in inputs.iter().enumerate() {
             let (mut machine, stale, id, sent) = abandoned();
@@ -5464,7 +5465,7 @@ mod tests {
         };
         let (mut connecting, _) = awaiting_connect_reply();
         let short = connecting.handle(Input::Slept {
-            gap: SLEEP_THRESHOLD - Duration::from_millis(1),
+            gap: SLEEP_THRESHOLD.saturating_sub(Duration::from_millis(1)),
         });
         let long = connecting.handle(Input::Slept {
             gap: SLEEP_THRESHOLD,
