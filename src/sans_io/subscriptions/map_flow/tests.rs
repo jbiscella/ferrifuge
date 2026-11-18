@@ -2445,3 +2445,20 @@ fn a_later_page_of_the_same_epoch_is_handled_while_a_publication_is_held() {
 
     assert_eq!(subscribe_sent(&third)["subscribe"]["cursor"], "c2");
 }
+
+// A page that also carries an error is never handled early: it waits its
+// turn behind the held publication.
+#[test]
+fn a_page_with_an_error_waits_its_turn_behind_a_held_publication() {
+    let (mut machine, transport, first) = held_behind_a_publication();
+
+    machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"id":{},"error":{{"code":100,"message":"m"}},"subscribe":{{"type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5}}}}"#,
+            id_of(&first)
+        ),
+    ));
+
+    assert_eq!(machine.read_ahead().0, 1);
+}

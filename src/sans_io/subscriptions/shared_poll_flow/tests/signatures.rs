@@ -998,3 +998,31 @@ fn a_refresh_that_revokes_everything_starts_its_backoff_over() {
 
     assert_eq!(delay, want);
 }
+
+// An accepted refresh track starts the refresh backoff over: the next
+// refresh's failure waits the first step's delay.
+#[test]
+fn an_accepted_refresh_track_starts_the_refresh_backoff_over() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    machine.rng = fastrand::Rng::with_seed(7);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig1"));
+    let (mut request, _) = the_fetch(&machine.handle(refused(transport, &command, 109)));
+    for _ in 0..2 {
+        let (timer, _) = the_timer(&failed(&mut machine, id, request));
+        request = the_fetch(&machine.fire_key(TimerKey::SharedPoll(timer))).0;
+    }
+    let renewed = the_track(&signed(&mut machine, id, request, &["a"], "new"));
+    machine.handle(answered(transport, &renewed, &serde_json::json!({})));
+    let command = the_track(&track(&mut machine, id, &[("b", 0)], "sig2"));
+    let (request, _) = the_fetch(&machine.handle(refused(transport, &command, 109)));
+    let want = crate::backoff::delay(
+        0,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        &mut machine.rng.clone(),
+    );
+
+    let (_, delay) = the_timer(&failed(&mut machine, id, request));
+
+    assert_eq!(delay, want);
+}
