@@ -1701,3 +1701,30 @@ async fn a_browser_socket_reporting_another_subprotocol_fails_the_attempt() {
     assert_eq!(client.state(), ferrifuge::State::Connecting);
     client.disconnect();
 }
+
+// @W scenario: A browser client with tls_only refuses an endpoint that is not TLS
+#[wasm_bindgen_test]
+fn a_browser_client_with_tls_only_refuses_an_endpoint_that_is_not_tls() {
+    let built = Client::builder_with_transports([(
+        TransportKind::WebSocket,
+        "ws://example.invalid/connection/websocket?token=secret-token".to_owned(),
+    )])
+    .tls_only(true)
+    .build();
+
+    let error = built.expect_err("refused");
+    assert_eq!(
+        (
+            error.kind,
+            error.code,
+            error.transport,
+            error.message.as_str()
+        ),
+        (
+            ferrifuge::ErrorKind::Configuration,
+            ferrifuge::codes::error::BAD_CONFIGURATION,
+            Some(TransportKind::WebSocket),
+            "tls_only refuses the websocket endpoint: its scheme ws is not wss"
+        )
+    );
+}

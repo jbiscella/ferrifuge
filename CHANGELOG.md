@@ -29,6 +29,9 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
   `Debug` output (Block 67).
 - `test_util::Server` selects `centrifuge-json` when a client offers it, as
   Centrifugo does (Block 67, D8).
+- `ClientBuilder::tls_only` makes `build()` refuse every endpoint that is
+  not TLS (`wss://` for the websocket, `https://` for the others and the
+  emulation endpoint), naming the scheme, never the endpoint (Block 68).
 
 ### Changed
 

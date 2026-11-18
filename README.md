@@ -1053,6 +1053,30 @@ let client = ferrifuge::Client::builder("wss://example.com/connection/websocket"
   an array, the application's `websocket` shim included, and checks
   `WebSocket.protocol` once it opens.
 
+### Refusing endpoints that are not TLS
+
+A client can be made to refuse, when it is built, any endpoint that is not
+TLS, so that an endpoint configured by mistake cannot carry a token in
+clear text:
+
+```rust
+let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
+    .tls_only(true)
+    .build()?;
+```
+
+- A websocket endpoint must be `wss://`; an `http_stream`, sse or
+  WebTransport endpoint, and an emulation endpoint when one is set,
+  `https://`. The scheme is compared ignoring case.
+- `build()` otherwise fails with a configuration error that names the
+  transport and the scheme, never the endpoint.
+- A connector exempts no endpoint: a `ws://` endpoint over a stream the
+  application supplies (a VPN tunnel, the test double of
+  `test_util::Server`) needs `tls_only` off.
+- The client follows no redirect, except that a browser's `EventSource`
+  follows one it cannot refuse; a proxy's own scheme is not checked (an
+  `http://` proxy carries a TLS endpoint's connection through a tunnel).
+
 ### WebTransport (unstable)
 
 With the `unstable-webtransport` feature, a client can connect over
