@@ -112,6 +112,15 @@ jobs:
           cargo test --features tokio --test chaos_real | tee chaos-real.txt
           { echo '### Real-server chaos'; grep '^@P report' chaos-real.txt; } >> "$GITHUB_STEP_SUMMARY"
 
+      # The Docker daemon's and containerd's own log of the job, for a
+      # restart past its bound (chaos-real 44219684753; reviewer).
+      - name: Docker daemon log
+        if: failure()
+        run: |
+          mkdir -p chaos-real-artifacts
+          sudo -n journalctl -u docker -u containerd --since -60min --no-pager 2>&1 \
+            | tee chaos-real-artifacts/docker-daemon.txt > /dev/null || true
+
       # The child and container output of a failing seed (structural
       # acceptance), and of an unconfirmed one, whose first attempt
       # log_violation also writes (reviewer, 51c, seed 23).
