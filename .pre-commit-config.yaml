@@ -1,0 +1,8 @@
+# Opt-in for each clone: `pre-commit install` (Block 70 D7). The `secrets`
+# CI job scans the whole history with the same gitleaks version, and fails
+# when this rev and its version differ from the job's.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
