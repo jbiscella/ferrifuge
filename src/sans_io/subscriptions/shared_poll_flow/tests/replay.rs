@@ -17,10 +17,10 @@ fn timers_set(actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
         .collect()
 }
 
-/// Whether `timer` is one the shared poll flows hold as a retry (D7): a
-/// request's reply deadline is not. Told apart by the machine's own record,
-/// not by the delay: a retry's backoff can equal `Config::timeout`, the
-/// deadline's delay (a 5 s backoff once counted as a deadline here).
+/// Whether `timer` is one the shared poll flows hold as a retry (D7). Told
+/// apart from a reply deadline by the machine's own record, not by the
+/// delay: a retry's backoff can equal `Config::timeout`, the deadline's
+/// delay (a 5 s backoff once counted as a deadline here).
 fn held_as_retry(machine: &Machine, timer: SharedPollTimer) -> bool {
     machine
         .subscriptions
@@ -30,20 +30,49 @@ fn held_as_retry(machine: &Machine, timer: SharedPollTimer) -> bool {
         .any(|flow| flow.timers.iter().any(|(held, _)| *held == timer))
 }
 
-/// The retry timers set among `actions`, with their delays.
-fn retries_set(machine: &Machine, actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
+/// Whether `timer` is the reply deadline of a track request in flight.
+fn held_as_deadline(machine: &Machine, timer: SharedPollTimer) -> bool {
+    machine
+        .subscriptions
+        .track_commands
+        .values()
+        .any(|command| command.timer == Some(timer))
+}
+
+/// The timers set among `actions` that the machine holds as retries (`retry`)
+/// or as reply deadlines, with their delays; one it holds as neither, or as
+/// both, fails the test, so that a timer
+/// can never be counted as the other kind by elimination (reviewer).
+fn timers_held(
+    machine: &Machine,
+    actions: &[Action],
+    retry: bool,
+) -> Vec<(SharedPollTimer, Duration)> {
     timers_set(actions)
         .into_iter()
-        .filter(|(timer, _)| held_as_retry(machine, *timer))
+        .filter(|(timer, _)| {
+            let (is_retry, is_deadline) = (
+                held_as_retry(machine, *timer),
+                held_as_deadline(machine, *timer),
+            );
+            assert!(
+                is_retry != is_deadline,
+                "{timer:?}: a retry {is_retry}, a deadline {is_deadline}"
+            );
+            is_retry == retry
+        })
         .collect()
 }
 
-/// The reply deadlines set among `actions`: the timers that are not
-/// retries.
+/// The retry timers set among `actions`, with their delays.
+fn retries_set(machine: &Machine, actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
+    timers_held(machine, actions, true)
+}
+
+/// The reply deadlines set among `actions`.
 fn deadlines_set(machine: &Machine, actions: &[Action]) -> Vec<SharedPollTimer> {
-    timers_set(actions)
+    timers_held(machine, actions, false)
         .into_iter()
-        .filter(|(timer, _)| !held_as_retry(machine, *timer))
         .map(|(timer, _)| timer)
         .collect()
 }
@@ -653,5 +682,9 @@ fn a_backoff_equal_to_the_reply_deadline_is_still_the_retry() {
         let fired = machine.fire_key(TimerKey::SharedPoll(timer));
         command = requests(&fired, 1)[0].clone();
     }
-    assert_eq!(delays[2], Config::default().timeout, "{delays:?}");
+    assert_eq!(
+        delays[2],
+        Config::default().timeout,
+        "seed 175 no longer draws 5 s at the third failure ({delays:?}): pick a new seed"
+    );
 }
