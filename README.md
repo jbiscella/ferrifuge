@@ -1464,7 +1464,10 @@ On the certified chain:
   of the bundled source meets section 11.1, are for you to settle with
   your assessor.
 - The build also compiles the non-FIPS `aws-lc-sys`, which rustls's
-  `aws-lc-rs` feature pulls in; the FIPS provider does not use it.
+  `aws-lc-rs` feature pulls in, but does not link it: the FIPS provider
+  does not use it, and a Ferrifuge `fips` binary contains no `aws-lc-sys`
+  symbol (checked with `nm` on Linux, on this chain and on the committed
+  lock; CI checks both).
 - The chain carries these RustSec advisories, fixed only in releases
   outside it. For a Ferrifuge client:
   - RUSTSEC-2026-0285 applies: TLS 1.3 handshake messages are accepted
