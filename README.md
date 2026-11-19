@@ -1499,6 +1499,15 @@ Ferrifuge never calls (certificate hashes, parsing a peer's certificate);
 a release build contains neither, and the root `clippy.toml` refuses the
 calls that would reach them.
 
+The websocket transport links RustCrypto's sha1 0.11 in every `tokio`
+build, the `fips` build included, through tungstenite 0.30: the client
+checks the server's `Sec-WebSocket-Accept`, the base64 SHA-1 of the
+`Sec-WebSocket-Key` it sent and a fixed GUID (RFC 6455 §4.1, §4.2.2). That
+check only shows that the server read a WebSocket handshake (§1.3). The
+key is a random nonce, not a secret, and the hash protects no data. Over
+`wss://`, TLS protects the connection, through the build's provider. In
+the browser, the browser's WebSocket makes this check.
+
 Without default features, ferrifuge has no runtime or network dependency.
 With `unstable-machine`, `ferrifuge::machine::Machine` then takes inputs (API
 calls, transport activity, timers) and returns the actions to perform; that
