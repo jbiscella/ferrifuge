@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "ferrifuge"
-version = "1.0.0-alpha.2"
+version = "1.0.0-alpha.3"
 dependencies = [
  "bytes",
  "fastrand",
