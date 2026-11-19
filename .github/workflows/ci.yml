@@ -28,6 +28,13 @@ env:
   # Line-coverage floor for the library, mirrors the 70% instruction floor
   # used in the JVM projects. Branch coverage needs nightly, so lines only.
   COVERAGE_FLOOR: 70
+  # CMake for the aws-lc builds, Kitware's release rather than the runner's
+  # apt mirrors, which failed twice (an image without one, an unreachable
+  # one). Bumped by hand: version, asset and digest together, the digest
+  # from the release's cmake-<version>-SHA-256.txt.
+  CMAKE_VERSION: 4.4.5
+  CMAKE_ASSET: cmake-4.4.5-linux-x86_64.tar.gz
+  CMAKE_SHA256: ed85135c5a5135b45e50423cb406dea04ca3338da0b8ef3c9ede963559680be0
 
 jobs:
   lint:
@@ -264,7 +271,15 @@ jobs:
       # aws-lc builds with a C compiler; its FIPS module also needs CMake and
       # Go. Installed explicitly rather than relying on the runner image.
       - name: Install CMake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$CMAKE_ASSET" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/$CMAKE_ASSET"
+          echo "$CMAKE_SHA256  $RUNNER_TEMP/$CMAKE_ASSET" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$CMAKE_ASSET" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cmake-$CMAKE_VERSION-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: CMake on PATH is the pinned one
+        run: cmake --version | grep -Fqx "cmake version $CMAKE_VERSION"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -340,7 +355,15 @@ jobs:
 
       # The FIPS module needs CMake and Go, as in the providers job.
       - name: Install CMake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$CMAKE_ASSET" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/$CMAKE_ASSET"
+          echo "$CMAKE_SHA256  $RUNNER_TEMP/$CMAKE_ASSET" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$CMAKE_ASSET" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cmake-$CMAKE_VERSION-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: CMake on PATH is the pinned one
+        run: cmake --version | grep -Fqx "cmake version $CMAKE_VERSION"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -1424,7 +1447,15 @@ jobs:
       # The aws-lc builds too (Block 20, D6): their build scripts run under
       # cargo check, so CMake and Go are installed as for the providers job.
       - name: Install CMake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$CMAKE_ASSET" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/$CMAKE_ASSET"
+          echo "$CMAKE_SHA256  $RUNNER_TEMP/$CMAKE_ASSET" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$CMAKE_ASSET" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cmake-$CMAKE_VERSION-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: CMake on PATH is the pinned one
+        run: cmake --version | grep -Fqx "cmake version $CMAKE_VERSION"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
