@@ -97,19 +97,45 @@ async fn a_client_with_the_fake_endpoint(world: &mut ClientWorld) {
 async fn the_fake_server_counted(world: &mut ClientWorld, handshakes: usize) {
     // A handshake more, which the step must not miss, would come at once.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_handshakes(world, handshakes);
+}
+
+/// The client's error for a connection the fake server's driver closed with
+/// `H3_FRAME_UNEXPECTED` (#382).
+const CLOSED_WITH_261: &str = "message: \"connection closed by peer: 261\"";
+
+/// Asserts that the fake server counted `expected` QUIC handshakes, besides
+/// those its own wtransport driver closed with `H3_FRAME_UNEXPECTED`: its
+/// control-stream frame reads are not cancel-safe (wtransport#331, tracked
+/// by #382), so a handshake sometimes fails and the client makes it again.
+/// Each one discounted must be one of the client's failed attempts,
+/// reported as closed by the peer with 261, and no other. To be removed
+/// with #382.
+fn assert_handshakes(world: &ClientWorld, expected: usize) {
     let fake = fake_webtransport(world);
+    let discounted = fake.frame_unexpected();
+    let closed_with_261 = world
+        .skipped_transport_errors
+        .iter()
+        .filter(|error| error.contains(CLOSED_WITH_261))
+        .count();
     // A count off by one is either this client's own attempt failing and
     // being made again, which its failed attempts and their errors tell, or
     // a connection from elsewhere. The addresses do not tell them apart:
     // the client binds a new UDP socket for each handshake.
-    assert_eq!(
-        fake.handshakes(),
-        handshakes,
-        "QUIC connections from {:?}; the client's failed attempts: {}, their errors: {:?}",
+    let shown = format!(
+        "QUIC connections from {:?}, {discounted} closed with H3_FRAME_UNEXPECTED by the fake server's driver; the client's failed attempts: {}, their errors: {:?}",
         fake.remotes(),
         world.client().statistics().failed_attempts,
         world.skipped_transport_errors
     );
+    if discounted > 0 {
+        println!(
+            "discounting {discounted} handshake(s) closed with H3_FRAME_UNEXPECTED (wtransport#331, #382): {shown}"
+        );
+    }
+    assert_eq!(closed_with_261, discounted, "{shown}");
+    assert_eq!(fake.handshakes(), expected + discounted, "{shown}");
 }
 
 #[when("the fake server ends the session after a disconnect push with a reconnect-advised code")]
@@ -130,7 +156,7 @@ async fn ends_the_session_with_a_reconnect_code(world: &mut ClientWorld) {
 async fn connected_after_handshakes(world: &mut ClientWorld, handshakes: usize) {
     configure_fake(world).await;
     connect_over_webtransport(world).await;
-    assert_eq!(fake_webtransport(world).handshakes(), handshakes);
+    assert_handshakes(world, handshakes);
 }
 
 #[when(r#"the fake server's TLS configuration changes to offer only "h3""#)]

@@ -84,6 +84,12 @@ struct State {
     stream_finished_at: Option<Instant>,
     /// When the latest session's QUIC connection closed.
     connection_closed_at: Option<Instant>,
+    /// Connections that this server's own wtransport driver closed with
+    /// `H3_FRAME_UNEXPECTED` (261): its control-stream frame reads are not
+    /// cancel-safe (wtransport#331, tracked by #382). With them, those
+    /// closed before the session's response went out, whose code wtransport
+    /// does not report.
+    frame_unexpected: usize,
 }
 
 pub(crate) struct FakeWebTransport {
@@ -166,6 +172,12 @@ impl FakeWebTransport {
     /// QUIC connection attempts counted so far.
     pub(crate) fn handshakes(&self) -> usize {
         lock(&self.state).handshakes
+    }
+
+    /// Connections closed with `H3_FRAME_UNEXPECTED` by this server's own
+    /// wtransport driver (#382).
+    pub(crate) fn frame_unexpected(&self) -> usize {
+        lock(&self.state).frame_unexpected
     }
 
     /// The address each QUIC connection attempt came from, in order.
@@ -286,19 +298,30 @@ async fn serve(
     state: Arc<Mutex<State>>,
     websocket: String,
 ) {
-    let Ok(request) = incoming.await else {
-        return;
+    let request = match incoming.await {
+        Ok(request) => request,
+        Err(error) => return note(&state, &error),
     };
     if lock(&state).refuse {
         request.not_found().await;
         return;
     }
     let protobuf = request.path().contains("cf_protocol=protobuf");
-    let Ok(connection) = request.accept().await else {
-        return;
+    let connection = match request.accept().await {
+        Ok(connection) => connection,
+        // The driver closed the connection before the response went out:
+        // wtransport reports only `LocallyClosed` here, without the code
+        // (0.7.2 `endpoint.rs`, `send_response`). Counted as the 261 it
+        // usually is; the steps check it against the client's errors.
+        Err(wtransport::error::ConnectionError::LocallyClosed) => {
+            lock(&state).frame_unexpected += 1;
+            return;
+        }
+        Err(error) => return note(&state, &error),
     };
-    let Ok((mut send, mut recv)) = connection.accept_bi().await else {
-        return;
+    let (mut send, mut recv) = match connection.accept_bi().await {
+        Ok(stream) => stream,
+        Err(error) => return note(&state, &error),
     };
     let (controls, mut commands) = mpsc::unbounded_channel();
     let end_before_connect = {
@@ -311,6 +334,9 @@ async fn serve(
     if end_before_connect {
         let _ = send.finish().await;
         let _ = connection.closed().await;
+        if let Some(error) = driver_error(&connection).await {
+            note(&state, &error);
+        }
         return;
     }
     let mut request = websocket
@@ -398,7 +424,47 @@ async fn serve(
     }
     let _ = sink.close().await;
     let _ = connection.closed().await;
+    if let Some(error) = driver_error(&connection).await {
+        note(&state, &error);
+    }
     lock(&state).connection_closed_at = Some(Instant::now());
+}
+
+/// The driver's own result for a closed `connection`: `closed()` answers
+/// `LocallyClosed` whatever the cause, while a stream call returns the
+/// driver's error (wtransport 0.7.2 `connection.rs`). None if the driver
+/// gives none within a second.
+async fn driver_error(
+    connection: &wtransport::Connection,
+) -> Option<wtransport::error::ConnectionError> {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            // The client opens no unidirectional stream; a closed connection
+            // accepts none.
+            if let Err(error) = connection.accept_uni().await {
+                return error;
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+/// Counts a connection that this server's own wtransport driver closed with
+/// `H3_FRAME_UNEXPECTED` (261, wtransport#331, #382): `incoming.await`,
+/// `accept_bi()` and stream calls return it as `LocalH3Error`. `H3Error`
+/// shows its code only through `Display`, which is the code's own
+/// (wtransport 0.7.2 `error.rs`).
+fn note(state: &Mutex<State>, error: &wtransport::error::ConnectionError) {
+    use wtransport::proto::error::ErrorCode;
+    if let wtransport::error::ConnectionError::LocalH3Error(h3) = error
+        && h3.to_string() == ErrorCode::FrameUnexpected.to_string()
+    {
+        println!(
+            "fake WebTransport server: its driver closed a connection with H3_FRAME_UNEXPECTED (261), wtransport#331, #382"
+        );
+        lock(state).frame_unexpected += 1;
+    }
 }
 
 /// The complete frames at the start of `read`, removed from it: whole
