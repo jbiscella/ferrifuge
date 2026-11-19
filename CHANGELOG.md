@@ -14,6 +14,8 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.3] - 2026-11-19
+
 ### Added
 
 - The `fips` build can run on AWS-LC FIPS 3.1.0, the module of CMVP

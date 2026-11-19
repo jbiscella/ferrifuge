@@ -200,7 +200,7 @@ Add it to `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrifuge = "1.0.0-alpha.2"
+ferrifuge = "1.0.0-alpha.3"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -1483,7 +1483,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "1.0.0-alpha.2", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "1.0.0-alpha.3", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1630,7 +1630,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "1.0.0-alpha.2", features = ["test-util"] }
+ferrifuge = { version = "1.0.0-alpha.3", features = ["test-util"] }
 ```
 
 ```rust
