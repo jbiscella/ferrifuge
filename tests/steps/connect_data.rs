@@ -36,6 +36,8 @@ pub(crate) struct ConnectData {
     client_name: Option<String>,
     /// Emulated headers of the client (17b).
     emulated_headers: Vec<(String, String)>,
+    /// The client's emulation endpoint, when a scoped HTTP proxy sets one.
+    pub(crate) emulation_endpoint: Option<String>,
     /// The debug output of client options a step formatted.
     debug: Option<String>,
     /// `Config::token` and `Config::min_reconnect_delay` of the client (17c).
@@ -73,6 +75,10 @@ impl ConnectData {
         let builder = builder
             .http_headers(self.http_headers.clone())
             .emulated_headers(self.emulated_headers.clone());
+        let builder = match &self.emulation_endpoint {
+            Some(endpoint) => builder.emulation_endpoint(endpoint.clone()),
+            None => builder,
+        };
         let Some(answers) = self.callback.clone() else {
             return builder;
         };
@@ -628,11 +634,8 @@ async fn a_client_with_a_header_behind_the_http_proxy(
     world.connect_data.http_headers.push(header(&given));
     let kind = super::transports::kind(&transport);
     let http_proxy = super::transports::pinging_server_behind_an_http_proxy(world).await;
-    let url = format!(
-        "http://{}/connection/{}",
-        http_proxy.address(),
-        kind.as_str()
-    );
+    let url = http_proxy.stream_url(kind.as_str());
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     super::transports::configure(world, vec![(kind, url)]);
     super::transports::connect_and_wait(world).await;
     world.http_proxy = Some(http_proxy);

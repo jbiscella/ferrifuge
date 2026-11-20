@@ -60,6 +60,8 @@ pub(crate) struct HttpProxy {
 struct ProxyState {
     /// `host:port` of the server.
     target: String,
+    /// The path prefix of a scoped proxy ([`HttpProxy::start_scoped`]).
+    prefix: Option<String>,
     http: reqwest::Client,
     reject_next_emulation: AtomicBool,
     /// Rejects the next emulation request whose body holds these bytes.
@@ -100,12 +102,32 @@ struct ProxyState {
 
 impl HttpProxy {
     pub(crate) async fn start(target: String) -> Self {
+        Self::start_with(target, None).await
+    }
+
+    /// A proxy that serves only paths under a prefix of its own, given by
+    /// [`HttpProxy::stream_url`] and [`HttpProxy::emulation_url`], and
+    /// answers 404 to any other request without recording it or letting
+    /// it take a programmed answer. A client of another scenario, here or
+    /// in another test process, may reach its port when the system gives
+    /// it a port that client used: main on 87c8836 saw a websocket request
+    /// in an `http_stream` scenario. That client's endpoints never carry
+    /// this prefix.
+    pub(crate) async fn start_scoped(target: String) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let next = NEXT.fetch_add(1, Ordering::Relaxed);
+        let prefix = format!("/proxy-{}-{next}", std::process::id());
+        Self::start_with(target, Some(prefix)).await
+    }
+
+    async fn start_with(target: String, prefix: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind HTTP proxy");
         let port = listener.local_addr().expect("HTTP proxy address").port();
         let state = Arc::new(ProxyState {
             target,
+            prefix,
             http: reqwest::Client::new(),
             reject_next_emulation: AtomicBool::new(false),
             never_answer_next: AtomicBool::new(false),
@@ -278,6 +300,24 @@ impl HttpProxy {
     pub(crate) fn address(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
+
+    /// The endpoint of transport `kind` (`http_stream`, `sse`) through the
+    /// proxy, under its prefix if it has one.
+    pub(crate) fn stream_url(&self, kind: &str) -> String {
+        format!("{}/connection/{kind}", self.base())
+    }
+
+    /// The emulation endpoint through the proxy, under its prefix if it has
+    /// one: a client of a scoped proxy needs it set, since the derived one
+    /// replaces the whole path.
+    pub(crate) fn emulation_url(&self) -> String {
+        format!("{}/emulation", self.base())
+    }
+
+    fn base(&self) -> String {
+        let prefix = self.state.prefix.as_deref().unwrap_or("");
+        format!("http://{}{prefix}", self.address())
+    }
 }
 
 impl Drop for HttpProxy {
@@ -400,21 +440,33 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     if let Some(command) = parts.uri.path().strip_prefix(CONTROL) {
         return control(&state, command).await;
     }
+    // The path and query the server gets: without a scoped proxy's prefix,
+    // and only for requests that carry it.
+    let path_and_query = parts.uri.path_and_query().map_or("/", |path| path.as_str());
+    let path_and_query = match state.prefix.as_deref() {
+        None => path_and_query,
+        Some(prefix) => match path_and_query.strip_prefix(prefix) {
+            Some(rest) if rest.starts_with('/') => rest,
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        },
+    };
+    let path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _)| path);
     state
         .requests
         .lock()
         .unwrap()
-        .push((parts.uri.path().to_owned(), parts.headers.clone()));
-    hold_if_programmed(&state, parts.uri.path()).await;
-    if parts.uri.path() == "/emulation" && state.reject_next_emulation.swap(false, Ordering::SeqCst)
-    {
+        .push((path.to_owned(), parts.headers.clone()));
+    hold_if_programmed(&state, path).await;
+    if path == "/emulation" && state.reject_next_emulation.swap(false, Ordering::SeqCst) {
         state.rejected.store(true, Ordering::SeqCst);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if parts.uri.path() == "/emulation" {
+    if path == "/emulation" {
         state.emulation_bodies.lock().unwrap().push(body.to_vec());
         let mut carrying = state.reject_carrying.lock().unwrap();
         if carrying.is_some_and(|bytes| body.windows(bytes.len()).any(|window| window == bytes)) {
@@ -424,11 +476,11 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
         }
     }
     let limit = *state.refuse_over.lock().unwrap();
-    if parts.uri.path() == "/emulation" && limit.is_some_and(|limit| body.len() > limit) {
+    if path == "/emulation" && limit.is_some_and(|limit| body.len() > limit) {
         state.refused.lock().unwrap().push(body.to_vec());
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
-    let unsubscribe = parts.uri.path() == "/emulation"
+    let unsubscribe = path == "/emulation"
         && body
             .windows(b"unsubscribe".len())
             .any(|window| window == b"unsubscribe");
@@ -438,10 +490,12 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
             tokio::time::sleep(delay).await;
         }
     }
-    let path = parts.uri.path_and_query().map_or("/", |path| path.as_str());
     let mut upstream = state
         .http
-        .request(parts.method, format!("http://{}{path}", state.target))
+        .request(
+            parts.method,
+            format!("http://{}{path_and_query}", state.target),
+        )
         .body(body);
     // The browser's own, and what CORS needs (Block 44, D18); the
     // cookies a browser sends (Block 44, D13).
@@ -478,10 +532,10 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
             relayed = relayed.header(&name, value);
         }
     }
-    let cookie = if parts.uri.path() == "/emulation" {
+    let cookie = if path == "/emulation" {
         state.emulation_answered.fetch_add(1, Ordering::SeqCst);
         state.emulation_cookie.lock().unwrap().clone()
-    } else if parts.uri.path().starts_with("/connection/") {
+    } else if path.starts_with("/connection/") {
         state.stream_cookie.lock().unwrap().clone()
     } else {
         None
