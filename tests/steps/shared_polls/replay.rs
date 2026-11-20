@@ -667,8 +667,9 @@ async fn tracking_at_an_epoch(
     // Over http_stream through the HTTP proxy, which keeps the commands the
     // client sends.
     let server = world.server.as_ref().expect("a Centrifugo server");
-    let http_proxy = HttpProxy::start(server.address().to_owned()).await;
-    let url = format!("http://{}/connection/http_stream", http_proxy.address());
+    let http_proxy = HttpProxy::start_scoped(server.address().to_owned()).await;
+    let url = http_proxy.stream_url("http_stream");
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     world.http_proxy = Some(http_proxy);
     super::super::transports::configure(
         world,

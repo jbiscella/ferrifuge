@@ -269,7 +269,8 @@ pub(super) async fn a_client_connected_over(
     }
     let url = match &world.http_proxy {
         Some(proxy) if kind.is_emulated() => {
-            format!("http://{}/connection/{}", proxy.address(), kind.as_str())
+            world.connect_data.emulation_endpoint = Some(proxy.emulation_url());
+            proxy.stream_url(kind.as_str())
         }
         _ => server_url(server(world), kind),
     };
@@ -293,7 +294,8 @@ async fn a_client_connected_over_sse_with_expiring_token(world: &mut ClientWorld
 )]
 async fn a_client_behind_an_http_proxy(world: &mut ClientWorld) {
     let http_proxy = pinging_server_behind_an_http_proxy(world).await;
-    let url = format!("http://{}/connection/http_stream", http_proxy.address());
+    let url = http_proxy.stream_url("http_stream");
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     configure(world, vec![(TransportKind::HttpStream, url)]);
     connect_and_wait(world).await;
     http_proxy.reject_next_emulation();
@@ -324,7 +326,7 @@ pub(super) async fn pinging_server_behind_an_http_proxy(world: &mut ClientWorld)
         .collect();
     world.relay = None;
     world.server = Some(Centrifugo::start(&env).await);
-    HttpProxy::start(server(world).address().to_owned()).await
+    HttpProxy::start_scoped(server(world).address().to_owned()).await
 }
 
 /// Its pong to the next server ping: rejected when a rejection is

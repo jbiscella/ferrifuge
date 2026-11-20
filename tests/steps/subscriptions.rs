@@ -500,7 +500,7 @@ fn the_subscribe_proxy_answers_with_data(world: &mut ClientWorld, channel: Strin
 #[given("a server with http_stream enabled and a subscribe proxy that answers after 1 s")]
 async fn a_slow_subscribe_proxy(world: &mut ClientWorld) {
     proxy(world).subscribe_delay_after_release(CHANNEL, Duration::from_secs(1));
-    world.http_proxy = Some(HttpProxy::start(server(world).address().to_owned()).await);
+    world.http_proxy = Some(HttpProxy::start_scoped(server(world).address().to_owned()).await);
 }
 
 /// The proxy records every subscribe request.
@@ -746,9 +746,10 @@ async fn the_new_subscription_receives_a_publication(world: &mut ClientWorld) {
     regex = r#"^a client connected over transport "http_stream" through a proxy that delays the next unsubscribe emulation request by 1 s$"#
 )]
 async fn a_client_behind_a_delaying_proxy(world: &mut ClientWorld) {
-    let http_proxy = HttpProxy::start(server(world).address().to_owned()).await;
+    let http_proxy = HttpProxy::start_scoped(server(world).address().to_owned()).await;
     http_proxy.delay_next_unsubscribe(DELAYED_UNSUBSCRIBE);
-    let url = format!("http://{}/connection/http_stream", http_proxy.address());
+    let url = http_proxy.stream_url("http_stream");
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     configure(
         world,
         vec![(ferrifuge::machine::TransportKind::HttpStream, url)],

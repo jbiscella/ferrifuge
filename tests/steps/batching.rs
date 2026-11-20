@@ -1097,16 +1097,13 @@ async fn a_client_behind_a_refusing_proxy(
     limit: usize,
 ) {
     let kind = super::transports::kind(&transport);
-    let http_proxy = crate::support::http_proxy::HttpProxy::start(
+    let http_proxy = crate::support::http_proxy::HttpProxy::start_scoped(
         super::transports::server(world).address().to_owned(),
     )
     .await;
     http_proxy.refuse_emulation_over(limit);
-    let url = format!(
-        "http://{}/connection/{}",
-        http_proxy.address(),
-        kind.as_str()
-    );
+    let url = http_proxy.stream_url(kind.as_str());
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     super::transports::configure(world, vec![(kind, url)]);
     super::transports::connect_and_wait(world).await;
     world.http_proxy = Some(http_proxy);

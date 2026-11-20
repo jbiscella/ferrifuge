@@ -452,7 +452,8 @@ async fn disconnected_with_the_reason_sent(world: &mut ClientWorld, code: u32) {
 async fn a_client_behind_a_proxy_that_never_answers(world: &mut ClientWorld, seconds: u64) {
     world.timeout = Some(Duration::from_secs(seconds));
     let http_proxy = pinging_server_behind_an_http_proxy(world).await;
-    let url = format!("http://{}/connection/http_stream", http_proxy.address());
+    let url = http_proxy.stream_url("http_stream");
+    world.connect_data.emulation_endpoint = Some(http_proxy.emulation_url());
     configure(world, vec![(TransportKind::HttpStream, url)]);
     connect_and_wait(world).await;
     http_proxy.never_answer_next_emulation();
