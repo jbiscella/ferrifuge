@@ -8,6 +8,7 @@ use ferrifuge::machine::TransportKind;
 use ferrifuge::{Client, ClientError, ClientEvent, Proxy, ProxyTarget};
 
 use super::{ClientWorld, expect_event};
+use crate::support::fake_server::FakeServer;
 use crate::support::forward_proxy::{Carried, Mode, TestProxy};
 use crate::support::logs;
 use crate::support::tls;
@@ -147,7 +148,13 @@ fn unreachable_endpoint(world: &mut ClientWorld, scheme: &str, path: &str) -> St
         format!("{UNREACHABLE_HOST}:{}", port_of(&server_address(world)))
     };
     world.proxies.expected.clone_from(&host);
-    format!("{scheme}://{host}{path}")
+    // A scoped fake server answers only under its prefix.
+    let prefix = world
+        .fake
+        .as_ref()
+        .map(FakeServer::prefix)
+        .unwrap_or_default();
+    format!("{scheme}://{host}{prefix}{path}")
 }
 
 fn captured(world: &mut ClientWorld) {

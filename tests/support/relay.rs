@@ -54,6 +54,9 @@ pub(crate) struct CountingRelay {
     /// Writes and bytes of the connections relayed in
     /// [`Mode::OneBytePerWrite`], both directions together.
     single: Arc<Singles>,
+    /// The path prefix its URLs carry: the scoped fake server's behind it
+    /// ([`CountingRelay::scoped`]), empty otherwise.
+    prefix: String,
 }
 
 /// What the connections relayed one byte per write have written.
@@ -307,7 +310,15 @@ impl CountingRelay {
             silent,
             gates,
             single,
+            prefix: String::new(),
         }
+    }
+
+    /// The same relay, its URLs under `prefix`: that of a scoped fake
+    /// server behind it ([`super::fake_server::FakeServer::start_scoped`]).
+    pub(crate) fn scoped(mut self, prefix: String) -> Self {
+        self.prefix = prefix;
+        self
     }
 
     /// The writes and the bytes of the connections relayed in
@@ -375,17 +386,25 @@ impl CountingRelay {
 
     /// Websocket endpoint of the server, through the relay.
     pub(crate) fn websocket_url(&self) -> String {
-        format!("ws://{}/connection/websocket", self.address())
+        format!(
+            "ws://{}{}/connection/websocket",
+            self.address(),
+            self.prefix
+        )
     }
 
     /// `http_stream` endpoint of the server, through the relay.
     pub(crate) fn http_stream_url(&self) -> String {
-        format!("http://{}/connection/http_stream", self.address())
+        format!(
+            "http://{}{}/connection/http_stream",
+            self.address(),
+            self.prefix
+        )
     }
 
     /// sse endpoint of the server, through the relay.
     pub(crate) fn sse_url(&self) -> String {
-        format!("http://{}/connection/sse", self.address())
+        format!("http://{}{}/connection/sse", self.address(), self.prefix)
     }
 
     /// Connections accepted so far.

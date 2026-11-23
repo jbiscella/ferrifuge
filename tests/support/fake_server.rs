@@ -65,6 +65,10 @@ const PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Default)]
 struct State {
+    /// The path prefix it serves under ([`FakeServer::start_scoped`]):
+    /// a request outside it is another scenario's client, answered 404
+    /// and otherwise ignored.
+    prefix: Option<String>,
     /// The Cookie header values of each upgrade request, in order (Block
     /// 43).
     upgrade_cookies: Vec<Vec<String>>,
@@ -292,18 +296,52 @@ impl State {
 }
 
 impl FakeServer {
+    /// Starts a fake server serving any request path.
     pub(crate) async fn start(announce: Announce) -> Self {
+        Self::start_with(announce, None).await
+    }
+
+    /// Starts a fake server serving only under a path prefix of its own,
+    /// `/fake-<pid>-<n>`: a client of another scenario reaching its port,
+    /// one the system gave out again, gets a 404 instead of becoming its
+    /// current connection, which would take the pushes the scenario sends
+    /// (the cause of the HTTP proxy's #391 flake, here for the websocket).
+    /// Its clients reach it through [`FakeServer::websocket_url`] or a
+    /// relay given [`FakeServer::prefix`].
+    pub(crate) async fn start_scoped(announce: Announce) -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::start_with(
+            announce,
+            Some(format!("/fake-{}-{next}", std::process::id())),
+        )
+        .await
+    }
+
+    async fn start_with(announce: Announce, prefix: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake server");
         let port = listener.local_addr().expect("fake server address").port();
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            prefix,
+            ..State::default()
+        }));
         let shared = Arc::clone(&state);
         let server = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 // Replies go out at once rather than waiting on the
                 // client's delayed acknowledgement (Nagle's algorithm).
                 let _ = tcp.set_nodelay(true);
+                // The request's head read whole first, as tungstenite
+                // refuses one taking many small reads (Block 50b).
+                let Ok(tcp) = PreRead::new(tcp).await else {
+                    continue;
+                };
+                // Before anything is recorded or answered as programmed.
+                let Some(tcp) = turn_away_foreign(&shared, tcp) else {
+                    continue;
+                };
                 // Written on the stream itself: tungstenite's server
                 // refuses a 2xx error response.
                 let portal = {
@@ -316,11 +354,6 @@ impl FakeServer {
                 }
                 let mut protobuf = false;
                 let cookies = Arc::clone(&shared);
-                // The request's head read whole first, as tungstenite
-                // refuses one taking many small reads (Block 50b).
-                let Ok(tcp) = PreRead::new(tcp).await else {
-                    continue;
-                };
                 // The callback's error type is tungstenite's, not ours.
                 #[allow(clippy::result_large_err)]
                 let accepted = tokio_tungstenite::accept_hdr_async(
@@ -422,6 +455,32 @@ impl FakeServer {
     /// `host:port` to connect to.
     pub(crate) fn address(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// The path prefix it serves under, empty when it serves any path.
+    pub(crate) fn prefix(&self) -> String {
+        self.state
+            .lock()
+            .unwrap()
+            .prefix
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// Its websocket endpoint, under its prefix.
+    pub(crate) fn websocket_url(&self) -> String {
+        format!(
+            "ws://{}{}/connection/websocket",
+            self.address(),
+            self.prefix()
+        )
+    }
+
+    /// Serves any path from now on: for clients whose endpoint names
+    /// another host, which a connector or a raw TCP pipe carries here, so
+    /// that their scenarios can check the path the client asked for.
+    pub(crate) fn serve_any_path(&self) {
+        self.state.lock().unwrap().prefix = None;
     }
 
     /// Closes the current connection with `code` and `reason`.
@@ -1712,7 +1771,42 @@ fn from_history(state: &State, channel: &str, subscribe: &Value) -> Value {
 
 /// Reads the upgrade request on `tcp` and answers it with `status` and a
 /// sign-in page, then closes.
-async fn answer_as_a_portal(mut tcp: tokio::net::TcpStream, status: u16) {
+/// The path of the request whose head is `head`, its query left out.
+fn request_path(head: &[u8]) -> Option<&str> {
+    let line = head.split(|&byte| byte == b'\r').next()?;
+    let target = std::str::from_utf8(line).ok()?.split(' ').nth(1)?;
+    Some(target.split_once('?').map_or(target, |(path, _)| path))
+}
+
+/// Whether `path` is under `prefix`; any path is without one.
+fn in_scope(prefix: Option<&str>, path: Option<&str>) -> bool {
+    prefix.is_none_or(|prefix| {
+        path.and_then(|path| path.strip_prefix(prefix))
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// `tcp`, unless its request is outside the prefix of the fake server
+/// whose state is `shared`: then answered 404 and nothing else.
+fn turn_away_foreign(shared: &Mutex<State>, tcp: PreRead) -> Option<PreRead> {
+    let prefix = shared.lock().unwrap().prefix.clone();
+    if in_scope(prefix.as_deref(), request_path(&tcp.head)) {
+        return Some(tcp);
+    }
+    tokio::spawn(answer_not_found(tcp));
+    None
+}
+
+/// Answers a request outside the fake server's prefix: 404, then closed.
+async fn answer_not_found(mut tcp: PreRead) {
+    use tokio::io::AsyncWriteExt;
+    let answer = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    let _ = tcp.write_all(answer.as_bytes()).await;
+    let _ = tcp.shutdown().await;
+}
+
+/// Answers as a captive portal; `tcp`'s head, read already, is read again.
+async fn answer_as_a_portal(mut tcp: PreRead, status: u16) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut request = Vec::new();
     let mut buffer = [0; 4096];

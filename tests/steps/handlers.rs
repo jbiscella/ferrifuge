@@ -924,8 +924,8 @@ async fn two_clients(world: &mut ClientWorld, mode: String) {
     // The second client has a fake server instance of its own: one
     // instance keeps only its latest connection, and the first client's
     // would close the second's.
-    let fake = FakeServer::start(Announce::default()).await;
-    let second = Client::builder(format!("ws://{}/connection/websocket", fake.address()))
+    let fake = FakeServer::start_scoped(Announce::default()).await;
+    let second = Client::builder(fake.websocket_url())
         .config(world.client_config())
         .event_delivery(delivery(&mode))
         .build()

@@ -535,8 +535,8 @@ fn no_record_contains_the_secrets(world: &mut ClientWorld) {
 #[given("two clients, each connected to its own fake server, their log records captured")]
 async fn two_captured_clients(world: &mut ClientWorld) {
     a_captured_connected_client(world).await;
-    let second = FakeServer::start(Announce::default()).await;
-    let client = Client::builder(format!("ws://{}/connection/websocket", second.address()))
+    let second = FakeServer::start_scoped(Announce::default()).await;
+    let client = Client::builder(second.websocket_url())
         .config(test_config())
         .build()
         .expect("a valid client");

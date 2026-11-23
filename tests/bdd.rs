@@ -1061,15 +1061,15 @@ async fn run_scenarios() {
                     world.proxy = Some(proxy);
                 }
                 if scenario.tags.iter().any(|tag| tag == "D") {
-                    world.fake = Some(FakeServer::start(Announce::default()).await);
+                    world.fake = Some(FakeServer::start_scoped(Announce::default()).await);
                 }
                 let target = match (&world.server, &world.fake) {
-                    (Some(server), _) => Some(server.address().to_owned()),
-                    (None, Some(fake)) => Some(fake.address()),
+                    (Some(server), _) => Some((server.address().to_owned(), String::new())),
+                    (None, Some(fake)) => Some((fake.address(), fake.prefix())),
                     (None, None) => None,
                 };
-                if let Some(target) = target {
-                    world.relay = Some(CountingRelay::start(target).await);
+                if let Some((target, prefix)) = target {
+                    world.relay = Some(CountingRelay::start(target).await.scoped(prefix));
                 }
             })
         })
