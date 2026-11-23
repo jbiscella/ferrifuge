@@ -411,8 +411,12 @@ impl ClientWorld {
 
     /// Replaces the scenario's fake server with one announcing `announce`.
     pub(crate) async fn restart_fake(&mut self, announce: Announce) {
-        let fake = FakeServer::start(announce).await;
-        self.relay = Some(CountingRelay::start(fake.address()).await);
+        let fake = FakeServer::start_scoped(announce).await;
+        self.relay = Some(
+            CountingRelay::start(fake.address())
+                .await
+                .scoped(fake.prefix()),
+        );
         self.fake = Some(fake);
     }
 

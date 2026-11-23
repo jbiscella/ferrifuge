@@ -103,6 +103,8 @@ fn a_client_with_a_connector(world: &mut ClientWorld, protocol: String, endpoint
     } else {
         Protocol::Json
     };
+    // Its endpoint names another host and the path the scenario checks.
+    world.fake().serve_any_path();
     let connector = connector(world, world.fake().address(), First::Connect);
     let builder = Client::builder(endpoint)
         .config(world.client_config())
@@ -119,6 +121,8 @@ fn a_client_with_a_failing_connector(world: &mut ClientWorld, endpoint: String, 
     } else {
         First::Fail
     };
+    // Its endpoint names another host and the path the scenario checks.
+    world.fake().serve_any_path();
     let connector = connector(world, world.fake().address(), first);
     let builder = Client::builder(endpoint)
         .config(world.client_config())
@@ -132,6 +136,8 @@ fn a_client_with_a_failing_connector(world: &mut ClientWorld, endpoint: String, 
 fn a_client_with_a_hanging_connector(world: &mut ClientWorld, endpoint: String, millis: u64) {
     let handshake = Duration::from_millis(millis);
     world.connectors.handshake = Some(handshake);
+    // Its endpoint names another host and the path the scenario checks.
+    world.fake().serve_any_path();
     let connector = connector(world, world.fake().address(), First::Hang);
     let mut config = world.client_config();
     config.handshake_timeout = handshake;
@@ -155,6 +161,8 @@ async fn a_tls_listener(world: &mut ClientWorld, issuer: String) {
         .await
         .expect("bind");
     let address = listener.local_addr().expect("an address").to_string();
+    // Its endpoint names another host and the path the scenario checks.
+    world.fake().serve_any_path();
     let target = world.fake().address();
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {

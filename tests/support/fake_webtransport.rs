@@ -144,7 +144,7 @@ impl FakeWebTransport {
         let port = endpoint.local_addr().expect("its address").port();
         let state = Arc::new(Mutex::new(State::default()));
         let shared = Arc::clone(&state);
-        let websocket = format!("ws://{}/connection/websocket", fake.address());
+        let websocket = fake.websocket_url();
         let server = tokio::spawn(async move {
             loop {
                 let incoming = endpoint.accept().await;

@@ -36,7 +36,7 @@ const RUNS: usize = 200;
 /// `no_alpn`, none, over a fake websocket server that runs its scripts.
 /// There is no TCP relay: the client dials the fake server directly.
 async fn start(world: &mut ClientWorld, no_alpn: bool) {
-    let fake = FakeServer::start(Announce::default()).await;
+    let fake = FakeServer::start_scoped(Announce::default()).await;
     world.webtransport.fake = Some(FakeWebTransport::start(&fake, no_alpn).await);
     world.fake = Some(fake);
     world.relay = None;
@@ -203,10 +203,7 @@ async fn a_client_with_both_fake_endpoints(world: &mut ClientWorld) {
     start(world, false).await;
     let endpoints = vec![
         (TransportKind::WebTransport, fake_webtransport(world).url()),
-        (
-            TransportKind::WebSocket,
-            format!("ws://{}/connection/websocket", world.fake().address()),
-        ),
+        (TransportKind::WebSocket, world.fake().websocket_url()),
     ];
     configure(world, endpoints);
     connect_over_webtransport(world).await;
