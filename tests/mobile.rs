@@ -50,6 +50,12 @@ const SERVER: &[(&str, &str)] = &[
 /// The bound of one run of the program.
 const RUN_LIMIT: Duration = Duration::from_secs(180);
 
+/// How long a Centrifugo binary may take to answer its health check. The
+/// macOS runner sometimes stalls: on 2026-11-19 and 2026-11-23 the TLS
+/// server wrote its first log line about 68 s and 34 s after it was
+/// spawned, then listened within 2 s; the bound was 30 s then.
+const START_LIMIT: Duration = Duration::from_secs(120);
+
 /// How long the server may still list a client on the channel after the
 /// program is done.
 const GONE_WITHIN: Duration = Duration::from_secs(10);
@@ -136,19 +142,28 @@ impl Server {
                 .env("CENTRIFUGO_HTTP_SERVER_TLS_KEY_PEM", key)
                 .env("CENTRIFUGO_HTTP_SERVER_TLS_EXTERNAL", "true");
         }
-        let child = command.spawn().expect("start Centrifugo");
+        let mut child = command.spawn().expect("start Centrifugo");
         let base = format!("http://127.0.0.1:{internal}");
         let started = Instant::now();
         while !reqwest::get(format!("{base}/health"))
             .await
             .is_ok_and(|response| response.status().is_success())
         {
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "Centrifugo did not start"
-            );
+            // A crash fails at once rather than after the bound.
+            if let Some(status) = child.try_wait().expect("Centrifugo's status") {
+                panic!(
+                    "{name}: Centrifugo exited with {status} before it was healthy, see {name}.log"
+                );
+            }
+            if started.elapsed() >= START_LIMIT {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{name}: Centrifugo not healthy within {START_LIMIT:?}, see {name}.log");
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        // Kept in the harness output, so that slow starts stay visible.
+        eprintln!("{name}: healthy after {:?}", started.elapsed());
         Self::Process {
             child,
             port,
@@ -183,8 +198,10 @@ impl Server {
                 server.stop().await;
             }
             Self::Process { mut child, .. } => {
+                let started = Instant::now();
                 let _ = child.kill();
                 let _ = child.wait();
+                eprintln!("{name}: stopped in {:?}", started.elapsed());
             }
         }
     }
