@@ -406,6 +406,24 @@ name = "perf_wallclock"
 harness = false
 required-features = ["tokio"]
 
+# The scenario runner matches every step's text against every step
+# definition on one thread: built without optimisation, those crates
+# stalled it 0.4 to 2.5 s at a time, 18 times in one run of the @D
+# scenarios, and 3 times with these lines (2026-11-24). Only this crate's
+# own builds read these profiles.
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.memchr]
+opt-level = 3
+[profile.dev.package.cucumber]
+opt-level = 3
+
 # Build profile of coverage-guided fuzzing with cargo-bolero (Block 14e).
 [profile.fuzz]
 inherits = "dev"
