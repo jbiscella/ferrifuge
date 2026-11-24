@@ -613,10 +613,14 @@ async fn one_frame_of_three_subscribes(world: &mut ClientWorld) {
 async fn then_one_rpc(world: &mut ClientWorld, method: String) {
     let start = world.fake().received().len();
     let made = std::time::Instant::now();
-    let result = world.client().rpc(method, b"{}".to_vec()).await;
+    let rpc = world.client().rpc(method, b"{}".to_vec());
+    // Stamped where it settles: the runner may poll this step late.
+    let (result, settled) = tokio::spawn(async move { (rpc.await, std::time::Instant::now()) })
+        .await
+        .expect("the call panicked");
     world.auto_batching.awaited = Some((
         result.map(|_| ()).map_err(|error| error.code),
-        made.elapsed(),
+        settled.saturating_duration_since(made),
         start,
     ));
 }

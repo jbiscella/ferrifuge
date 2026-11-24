@@ -298,12 +298,15 @@ fn failed_attempts(world: &mut ClientWorld, count: u64) {
     regex = r#"^within the configured handshake timeout plus tolerance the client emits an "error" event of kind transport with message "([^"]+)"$"#
 )]
 async fn error_within_the_handshake_timeout(world: &mut ClientWorld, message: String) {
-    let started = Instant::now();
+    // Measured between the events' arrivals, from "connecting", which the
+    // attempt starts with, when this step takes it: the runner may poll a
+    // step well after its event came.
+    let mut started = Instant::now();
     let handshake = world.connectors.handshake.expect("a handshake timeout");
     loop {
         let event = world.next_event().await;
         match &event {
-            ClientEvent::Connecting(_) => {}
+            ClientEvent::Connecting(_) => started = world.last_event_arrival(),
             ClientEvent::Error(error) => {
                 assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
                 assert_eq!(error.message, message, "{error:?}");
@@ -312,11 +315,10 @@ async fn error_within_the_handshake_timeout(world: &mut ClientWorld, message: St
             other => panic!("{other:?}"),
         }
     }
-    assert!(
-        started.elapsed() <= handshake + TOLERANCE,
-        "{:?}",
-        started.elapsed()
-    );
+    let took = world
+        .last_event_arrival()
+        .saturating_duration_since(started);
+    assert!(took <= handshake + TOLERANCE, "{took:?}");
 }
 
 #[then("the future of the connector's first call has been dropped")]
