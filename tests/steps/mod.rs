@@ -4,7 +4,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cucumber::World;
 use ferrifuge::machine::TransportKind;
@@ -145,7 +145,7 @@ pub(crate) struct ClientWorld {
     /// Between the client and the server: counts transport connections.
     pub(crate) relay: Option<CountingRelay>,
     pub(crate) client: Option<Client>,
-    events: Option<Events>,
+    events: Option<Recorded<ClientEvent>>,
     /// What a step must do the moment the client emits an event, rather
     /// than when the step, perhaps stalled, reads it (Block 17c).
     pub(crate) event_hook: EventHook,
@@ -331,21 +331,63 @@ type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
 
 /// Takes every event of `stream` as soon as it comes, as an application
 /// reading at once would, and keeps them for the steps: a stream that a
-/// step leaves unread must not hold back delivery (Block 15).
+/// step leaves unread must not hold back delivery (Block 15). Each event
+/// keeps the instant it came, so that a step bounding how soon an event
+/// comes measures the client, not when the scenario runner next polled
+/// the step: a woken step can wait a second or more for its poll while
+/// other scenarios run (2026-11-24, "A connector that never finishes…").
 fn recorded<E: Send + 'static>(
-    mut stream: impl Stream<Item = E> + Send + Unpin + 'static,
+    stream: impl Stream<Item = E> + Send + Unpin + 'static,
 ) -> Pin<Box<dyn Stream<Item = E> + Send>> {
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    Box::pin(stamped(stream))
+}
+
+/// As [`recorded`], keeping when the event yielded last came.
+pub(crate) fn stamped<E: Send + 'static>(
+    mut stream: impl Stream<Item = E> + Send + Unpin + 'static,
+) -> Recorded<E> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(event) = stream.next().await {
-            if sender.send(event).is_err() {
+            if sender.send((Instant::now(), event)).is_err() {
                 return;
             }
         }
     });
-    Box::pin(futures_util::stream::poll_fn(move |cx| {
-        receiver.poll_recv(cx)
-    }))
+    Recorded {
+        receiver,
+        last_arrival: None,
+    }
+}
+
+/// The events of a [`recorded`] stream, in order, each with the instant it
+/// came.
+pub(crate) struct Recorded<E> {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<(Instant, E)>,
+    last_arrival: Option<Instant>,
+}
+
+impl<E> Recorded<E> {
+    /// When the event this stream yielded last came.
+    pub(crate) fn last_arrival(&self) -> Option<Instant> {
+        self.last_arrival
+    }
+}
+
+impl<E> Stream for Recorded<E> {
+    type Item = E;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<E>> {
+        self.receiver.poll_recv(cx).map(|item| {
+            item.map(|(arrival, event)| {
+                self.last_arrival = Some(arrival);
+                event
+            })
+        })
+    }
 }
 
 impl fmt::Debug for ClientWorld {
@@ -437,7 +479,7 @@ impl ClientWorld {
                 *hook = None;
             }
         });
-        self.events = Some(recorded(events));
+        self.events = Some(stamped(events));
         self.client = Some(client);
     }
 
@@ -534,6 +576,15 @@ impl ClientWorld {
 
     pub(crate) fn client(&self) -> &Client {
         self.client.as_ref().expect("no client created yet")
+    }
+
+    /// When the client event [`Self::next_event`] returned last came from
+    /// the client: what a step bounding how soon an event comes measures.
+    pub(crate) fn last_event_arrival(&self) -> Instant {
+        self.events
+            .as_ref()
+            .and_then(Recorded::last_arrival)
+            .expect("an event taken from the client's stream")
     }
 
     pub(crate) async fn next_event(&mut self) -> ClientEvent {

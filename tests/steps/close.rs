@@ -28,10 +28,16 @@ async fn close_is_awaited(world: &mut ClientWorld) {
     let limit = test_config().timeout + TOLERANCE;
     let started = Instant::now();
     let closing = world.client().close();
-    tokio::time::timeout(limit, closing)
+    // Stamped where it resolves: the runner may poll this step late.
+    let resolved = tokio::spawn(async move {
+        closing.await;
+        Instant::now()
+    });
+    let resolved = tokio::time::timeout(limit, resolved)
         .await
-        .unwrap_or_else(|_| panic!("close() did not resolve within {limit:?}"));
-    world.close.took = Some(started.elapsed());
+        .unwrap_or_else(|_| panic!("close() did not resolve within {limit:?}"))
+        .expect("close() panicked");
+    world.close.took = Some(resolved.saturating_duration_since(started));
 }
 
 #[then("close resolves")]

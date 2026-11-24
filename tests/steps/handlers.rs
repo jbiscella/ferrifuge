@@ -14,7 +14,7 @@ use ferrifuge::{
 };
 
 use super::delivery::{offset, wait_until};
-use super::{ClientWorld, recorded};
+use super::{ClientWorld, stamped};
 use crate::support::fake_server::{Announce, FakeServer, Rpc};
 
 /// A handler call: what it was for, and when it ran.
@@ -156,7 +156,7 @@ fn build(
     // Its records, for a failure to show what the client went through.
     crate::support::logs::register(client.log_number());
     if recorded_stream {
-        world.events = Some(recorded(client.events()));
+        world.events = Some(stamped(client.events()));
     }
     *world.handlers.shared.client.lock().unwrap() = Some(client.downgrade());
     world.client = Some(client.clone());

@@ -5,9 +5,7 @@ use std::fmt;
 use cucumber::{given, then, when};
 use ferrifuge::{Client, ClientBuilder, ErrorKind, SubscriptionError, codes};
 
-use super::{
-    ClientWorld, EVENT_TIMEOUT, UNREACHABLE_ENDPOINT, expect_event, recorded, test_config,
-};
+use super::{ClientWorld, EVENT_TIMEOUT, UNREACHABLE_ENDPOINT, expect_event, test_config};
 use crate::support::fake_server::Rpc;
 
 /// The separate runtime of a Block 28 scenario, shut down without waiting
@@ -51,7 +49,7 @@ fn build_outside_any_runtime(builder: ClientBuilder) -> Result<Client, ferrifuge
 }
 
 fn keep(world: &mut ClientWorld, client: Client) {
-    world.events = Some(recorded(client.events()));
+    world.events = Some(super::stamped(client.events()));
     world.client = Some(client);
 }
 

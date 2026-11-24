@@ -646,7 +646,7 @@ async fn two_clients(world: &mut ClientWorld, info: bool) {
 /// As [`two_clients`], the second client using `second` (Block 38).
 pub(super) async fn two_clients_of(world: &mut ClientWorld, info: bool, second: Protocol) {
     let (client, client_id) = connected_as(world, 0, info, world.protocol).await;
-    world.events = Some(super::recorded(client.events()));
+    world.events = Some(super::stamped(client.events()));
     world.client_id = Some(client_id);
     world.client = Some(client);
     let subscription = subscription_of(world.client(), 0, info);
